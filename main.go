@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -555,7 +555,7 @@ func parseRSAPrivateKey(jwkJSON []byte) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-// rsaDecryptOAEP decrypts data using RSA-OAEP with SHA256
+// rsaDecryptOAEP decrypts data using RSA-OAEP with SHA1 (standard default)
 func rsaDecryptOAEP(key *rsa.PrivateKey, ciphertext []byte) ([]byte, error) {
-	return rsa.DecryptOAEP(sha256.New(), rand.Reader, key, ciphertext, nil)
+	return rsa.DecryptOAEP(sha1.New(), rand.Reader, key, ciphertext, nil)
 }
