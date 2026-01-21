@@ -87,15 +87,10 @@ type DecryptedItem struct {
 }
 
 type Field struct {
-	ID    string `json:"id,omitempty"`
-	Name  string `json:"n,omitempty"`
-	Type  string `json:"t,omitempty"`
-	Value string `json:"v,omitempty"`
-	K     string `json:"k,omitempty"` // field kind (concealed, string, etc.)
-	A     *FieldAttrs `json:"a,omitempty"`
-}
-
-type FieldAttrs struct {
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Value       string `json:"value,omitempty"`
 	Designation string `json:"designation,omitempty"`
 }
 

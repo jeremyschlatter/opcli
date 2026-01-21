@@ -40,6 +40,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "get":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: opcli get <op://vault/item>")
+			os.Exit(1)
+		}
+		if err := cmdGet(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -532,12 +541,8 @@ func cmdRead(uri string) error {
 	for _, f := range decryptedItem.Fields {
 		name := strings.ToLower(f.Name)
 		id := strings.ToLower(f.ID)
-		if name == fieldLower || id == fieldLower {
-			fmt.Println(f.Value)
-			return nil
-		}
-		// Also check designation
-		if f.A != nil && strings.ToLower(f.A.Designation) == fieldLower {
+		designation := strings.ToLower(f.Designation)
+		if name == fieldLower || id == fieldLower || designation == fieldLower {
 			fmt.Println(f.Value)
 			return nil
 		}
@@ -548,7 +553,8 @@ func cmdRead(uri string) error {
 		for _, f := range s.Fields {
 			name := strings.ToLower(f.Name)
 			id := strings.ToLower(f.ID)
-			if name == fieldLower || id == fieldLower {
+			designation := strings.ToLower(f.Designation)
+			if name == fieldLower || id == fieldLower || designation == fieldLower {
 				fmt.Println(f.Value)
 				return nil
 			}
@@ -617,6 +623,130 @@ func cmdList() error {
 		}
 
 		fmt.Printf("  %s (%s)\n", attrs.Name, v.VaultUUID)
+	}
+
+	return nil
+}
+
+func cmdGet(uri string) error {
+	// Parse URI - allow op://vault/item (without field)
+	if !strings.HasPrefix(uri, "op://") {
+		return fmt.Errorf("invalid URI: must start with op://")
+	}
+	parts := strings.Split(uri[5:], "/")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid URI: must be op://vault/item")
+	}
+	vaultName, itemName := parts[0], parts[1]
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	account, err := getAccount(db)
+	if err != nil {
+		return err
+	}
+	db.Close()
+
+	password, secretKey, err := getCredentials()
+	if err != nil {
+		return err
+	}
+
+	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+	if err != nil {
+		return err
+	}
+	defer vk.Close()
+
+	// Find vault (same logic as cmdRead)
+	vaults, err := getVaults(vk.db.DB)
+	if err != nil {
+		return err
+	}
+
+	var targetVaultUUID string
+	for _, v := range vaults {
+		var encAttrs EncryptedData
+		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
+			continue
+		}
+		key, err := vk.getVaultKey(v.VaultUUID)
+		if err != nil {
+			continue
+		}
+		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
+		if err != nil {
+			continue
+		}
+		var attrs struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
+			continue
+		}
+		if strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
+			targetVaultUUID = v.VaultUUID
+			break
+		}
+	}
+
+	if targetVaultUUID == "" {
+		return fmt.Errorf("vault not found: %s", vaultName)
+	}
+
+	vaultID, err := getVaultIDByUUID(vk.db.DB, targetVaultUUID)
+	if err != nil {
+		return err
+	}
+
+	items, err := getItemOverviews(vk.db.DB, vaultID)
+	if err != nil {
+		return err
+	}
+
+	var targetItem *ItemOverview
+	for i := range items {
+		overview, err := vk.decryptOverview(targetVaultUUID, &items[i].EncOverview)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
+			targetItem = &items[i]
+			break
+		}
+	}
+
+	if targetItem == nil {
+		return fmt.Errorf("item not found: %s", itemName)
+	}
+
+	detail, err := getItemDetail(vk.db.DB, targetItem.ID)
+	if err != nil {
+		return err
+	}
+
+	// Decrypt and dump raw JSON
+	key, err := vk.getVaultKey(targetVaultUUID)
+	if err != nil {
+		return err
+	}
+
+	decrypted, err := decryptEncryptedData(&detail.EncDetails, key)
+	if err != nil {
+		return err
+	}
+
+	// Pretty print the JSON
+	var raw json.RawMessage = decrypted
+	pretty, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		fmt.Println(string(decrypted))
+	} else {
+		fmt.Println(string(pretty))
 	}
 
 	return nil
