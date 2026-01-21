@@ -87,8 +87,9 @@ func cmdUnlock() error {
 	defer vk.Close()
 
 	fmt.Fprintln(os.Stderr, "Successfully unlocked!")
-	fmt.Fprintf(os.Stderr, "Primary key length: %d bytes\n", len(vk.primaryKey))
-	fmt.Fprintf(os.Stderr, "RSA key size: %d bits\n", vk.primaryRSA.N.BitLen())
+	fmt.Fprintf(os.Stderr, "Primary key length: %d bytes\n", len(vk.primarySymKey))
+	primaryRSA := vk.keysetRSAKeys[vk.primaryKeysetID]
+	fmt.Fprintf(os.Stderr, "RSA key size: %d bits\n", primaryRSA.N.BitLen())
 
 	return nil
 }
@@ -135,10 +136,12 @@ func getCredentials() (password, secretKey string, err error) {
 
 // VaultKeychain holds decrypted keys for accessing vault items
 type VaultKeychain struct {
-	db          *DB
-	primaryKey  []byte    // Decrypted primary symmetric key
-	primaryRSA  *rsa.PrivateKey // Decrypted primary RSA private key
-	vaultKeys   map[string][]byte // vault UUID -> symmetric key
+	db              *DB
+	primaryKeysetID string                       // UUID of the primary keyset
+	primarySymKey   []byte                       // Decrypted primary symmetric key
+	keysetRSAKeys   map[string]*rsa.PrivateKey   // keyset UUID -> RSA private key
+	keysetSymKeys   map[string][]byte            // keyset UUID -> symmetric key
+	vaultKeys       map[string][]byte            // vault UUID -> symmetric key
 }
 
 type DB struct {
@@ -152,8 +155,10 @@ func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error)
 	}
 
 	vk := &VaultKeychain{
-		db:        &DB{db},
-		vaultKeys: make(map[string][]byte),
+		db:            &DB{db},
+		keysetRSAKeys: make(map[string]*rsa.PrivateKey),
+		keysetSymKeys: make(map[string][]byte),
+		vaultKeys:     make(map[string][]byte),
 	}
 
 	// Get primary keyset
@@ -161,6 +166,7 @@ func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get primary keyset: %w", err)
 	}
+	vk.primaryKeysetID = keyset.KeysetUUID
 
 	// Parse the encrypted symmetric key
 	var encSymKey EncryptedData
@@ -175,10 +181,11 @@ func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error)
 	}
 
 	// Extract the actual key bytes from the JWK
-	vk.primaryKey, err = extractSymmetricKey(decryptedSymKeyJSON)
+	vk.primarySymKey, err = extractSymmetricKey(decryptedSymKeyJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract symmetric key: %w", err)
 	}
+	vk.keysetSymKeys[keyset.KeysetUUID] = vk.primarySymKey
 
 	// Decrypt the RSA private key
 	var encPriKey EncryptedData
@@ -186,15 +193,16 @@ func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error)
 		return nil, fmt.Errorf("failed to parse encrypted private key: %w", err)
 	}
 
-	decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, vk.primaryKey)
+	decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, vk.primarySymKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt private key: %w", err)
 	}
 
-	vk.primaryRSA, err = parseRSAPrivateKey(decryptedPriKeyJSON)
+	primaryRSA, err := parseRSAPrivateKey(decryptedPriKeyJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse RSA private key: %w", err)
 	}
+	vk.keysetRSAKeys[keyset.KeysetUUID] = primaryRSA
 
 	return vk, nil
 }
@@ -203,6 +211,113 @@ func (vk *VaultKeychain) Close() {
 	if vk.db != nil {
 		vk.db.Close()
 	}
+}
+
+// getKeysetRSAKey returns the RSA private key for a keyset, decrypting it if needed
+func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, error) {
+	if rsaKey, ok := vk.keysetRSAKeys[keysetUUID]; ok {
+		return rsaKey, nil
+	}
+
+	// Get the keyset
+	keyset, err := getKeyset(vk.db.DB, keysetUUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get keyset %s: %w", keysetUUID, err)
+	}
+
+	// Check if this keyset is encrypted by our primary keyset
+	if keyset.EncryptedBy != vk.primaryKeysetID {
+		// Try to get the parent keyset's RSA key recursively
+		parentRSA, err := vk.getKeysetRSAKey(keyset.EncryptedBy)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decrypt keyset %s: parent keyset %s unavailable: %w",
+				keysetUUID, keyset.EncryptedBy, err)
+		}
+
+		// Decrypt this keyset's symmetric key using parent's RSA key
+		var encSymKey EncryptedData
+		if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
+			return nil, fmt.Errorf("failed to parse keyset sym key: %w", err)
+		}
+
+		symKeyData, err := base64URLDecode(encSymKey.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode keyset sym key: %w", err)
+		}
+
+		decryptedSymKeyJSON, err := rsaDecryptOAEP(parentRSA, symKeyData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to RSA decrypt keyset sym key: %w", err)
+		}
+
+		symKey, err := extractSymmetricKey(decryptedSymKeyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract keyset sym key: %w", err)
+		}
+		vk.keysetSymKeys[keysetUUID] = symKey
+
+		// Decrypt the RSA private key using the symmetric key
+		var encPriKey EncryptedData
+		if err := json.Unmarshal([]byte(keyset.EncPriKey), &encPriKey); err != nil {
+			return nil, fmt.Errorf("failed to parse keyset private key: %w", err)
+		}
+
+		decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, symKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt keyset private key: %w", err)
+		}
+
+		rsaKey, err := parseRSAPrivateKey(decryptedPriKeyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse keyset RSA key: %w", err)
+		}
+
+		vk.keysetRSAKeys[keysetUUID] = rsaKey
+		return rsaKey, nil
+	}
+
+	// This keyset is encrypted by the primary keyset
+	// Decrypt sym key using primary RSA
+	var encSymKey EncryptedData
+	if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
+		return nil, fmt.Errorf("failed to parse keyset sym key: %w", err)
+	}
+
+	symKeyData, err := base64URLDecode(encSymKey.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode keyset sym key: %w", err)
+	}
+
+	primaryRSA := vk.keysetRSAKeys[vk.primaryKeysetID]
+	decryptedSymKeyJSON, err := rsaDecryptOAEP(primaryRSA, symKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to RSA decrypt keyset sym key: %w", err)
+	}
+
+	symKey, err := extractSymmetricKey(decryptedSymKeyJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract keyset sym key: %w", err)
+	}
+	vk.keysetSymKeys[keysetUUID] = symKey
+
+	// Decrypt the RSA private key
+	var encPriKey EncryptedData
+	if err := json.Unmarshal([]byte(keyset.EncPriKey), &encPriKey); err != nil {
+		return nil, fmt.Errorf("failed to parse keyset private key: %w", err)
+	}
+
+	decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, symKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt keyset private key: %w", err)
+	}
+
+	rsaKey, err := parseRSAPrivateKey(decryptedPriKeyJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse keyset RSA key: %w", err)
+	}
+
+	vk.keysetRSAKeys[keysetUUID] = rsaKey
+	return rsaKey, nil
 }
 
 // getVaultKey retrieves or decrypts the vault key for the given vault UUID
@@ -228,13 +343,19 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse encrypted vault key: %w", err)
 	}
 
-	// Vault keys are RSA-OAEP encrypted with the primary RSA key
+	// Get the RSA key for the keyset that encrypted this vault key
+	rsaKey, err := vk.getKeysetRSAKey(encVaultKey.Kid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get keyset RSA key: %w", err)
+	}
+
+	// Decrypt vault key using RSA-OAEP
 	keyData, err := base64URLDecode(encVaultKey.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode vault key data: %w", err)
 	}
 
-	decryptedKeyJSON, err := rsaDecryptOAEP(vk.primaryRSA, keyData)
+	decryptedKeyJSON, err := rsaDecryptOAEP(rsaKey, keyData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to RSA decrypt vault key: %w", err)
 	}
