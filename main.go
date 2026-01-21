@@ -49,6 +49,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "daemon":
+		if err := cmdDaemon(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -61,7 +66,9 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  opcli read <op://vault/item/field>  - Read a field from an item")
 	fmt.Println("  opcli list                          - List all vaults")
+	fmt.Println("  opcli get <op://vault/item>         - Dump item as JSON")
 	fmt.Println("  opcli unlock                        - Test unlock (verify credentials)")
+	fmt.Println("  opcli daemon                        - Start credential daemon")
 	fmt.Println()
 	fmt.Println("Environment variables:")
 	fmt.Println("  OP_SECRET_KEY      - Your 1Password Secret Key (A3-XXXXX-...)")
@@ -119,7 +126,12 @@ func parseOPURI(uri string) (vault, item, field string, err error) {
 
 // getCredentials prompts for master password and secret key
 func getCredentials() (password, secretKey string, err error) {
-	// Check for environment variables first
+	// Try daemon first
+	if pw, sk, ok := getCredentialsFromDaemon(); ok {
+		return pw, sk, nil
+	}
+
+	// Check for environment variables
 	secretKey = os.Getenv("OP_SECRET_KEY")
 	password = os.Getenv("OP_MASTER_PASSWORD")
 
