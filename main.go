@@ -73,6 +73,11 @@ func printUsage() {
 	fmt.Println("Environment variables:")
 	fmt.Println("  OP_SECRET_KEY      - Your 1Password Secret Key (A3-XXXXX-...)")
 	fmt.Println("  OP_MASTER_PASSWORD - Your master password")
+	fmt.Println()
+	fmt.Println("Security note:")
+	fmt.Println("  The unlock UX is WIP. The daemon is NOT secure against malicious")
+	fmt.Println("  processes on your machine - any process running as your user can")
+	fmt.Println("  request credentials. For high-security use, enter credentials manually.")
 }
 
 func cmdUnlock() error {
