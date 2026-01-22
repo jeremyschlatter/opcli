@@ -16,6 +16,7 @@ char* getTTYName() {
 */
 import "C"
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,7 @@ type Session struct {
 	AccountID  string    `json:"account_id"`
 	Created    time.Time `json:"created"`
 	LastAccess time.Time `json:"last_access"`
+	MAC        string    `json:"mac"` // HMAC of session data, verified using Keychain secret
 }
 
 type SessionStore struct {
@@ -114,6 +116,13 @@ func saveSessions(store *SessionStore) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// computeSessionMAC computes HMAC for session data using the Keychain secret.
+func computeSessionMAC(secret []byte, sessionKey, accountID string, created time.Time) string {
+	h := hmac.New(sha256.New, secret)
+	h.Write([]byte(fmt.Sprintf("%s:%s:%d", sessionKey, accountID, created.Unix())))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // GetValidSession returns a valid session for the current TTY, or nil if none exists.
 func GetValidSession(accountID string) (*Session, error) {
 	sessionKey, err := getSessionKey()
@@ -136,6 +145,19 @@ func GetValidSession(accountID string) (*Session, error) {
 		return nil, nil
 	}
 
+	// Verify MAC using Keychain secret (only opcli can read this)
+	secret, err := GetSessionSecret(accountID)
+	if err != nil {
+		return nil, err
+	}
+	expectedMAC := computeSessionMAC(secret, sessionKey, session.AccountID, session.Created)
+	if session.MAC != expectedMAC {
+		// Invalid MAC - session was forged or corrupted
+		delete(store.Sessions, sessionKey)
+		saveSessions(store)
+		return nil, nil
+	}
+
 	now := time.Now()
 
 	// Check inactivity timeout (10 minutes)
@@ -152,7 +174,7 @@ func GetValidSession(accountID string) (*Session, error) {
 		return nil, nil
 	}
 
-	// Update last access time
+	// Update last access time and recompute MAC
 	session.LastAccess = now
 	if err := saveSessions(store); err != nil {
 		// Non-fatal, session still valid
@@ -173,12 +195,19 @@ func CreateSession(accountID string) (*Session, error) {
 		return nil, err
 	}
 
+	// Get or create session secret from Keychain
+	secret, err := GetSessionSecret(accountID)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	session := &Session{
 		AccountID:  accountID,
 		Created:    now,
 		LastAccess: now,
 	}
+	session.MAC = computeSessionMAC(secret, sessionKey, accountID, now)
 
 	store.Sessions[sessionKey] = session
 

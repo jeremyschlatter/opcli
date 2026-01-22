@@ -164,6 +164,8 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"unsafe"
 )
@@ -172,6 +174,7 @@ const (
 	keychainService        = "opcli"
 	keychainSecretKeyLabel = "secret-key"
 	keychainPasswordLabel  = "master-password"
+	keychainSessionSecret  = "session-secret"
 )
 
 // keychainSet stores a value in the keychain (no biometric)
@@ -278,5 +281,28 @@ func HasStoredCredentials(accountID string) bool {
 func DeleteCredentials(accountID string) error {
 	keychainDelete(accountID + "/" + keychainSecretKeyLabel)
 	keychainDelete(accountID + "/" + keychainPasswordLabel)
+	keychainDelete(accountID + "/" + keychainSessionSecret)
 	return nil
+}
+
+// GetSessionSecret retrieves or creates the session secret for HMAC verification.
+// This secret is stored in Keychain with app-only ACL, so only opcli can read it.
+func GetSessionSecret(accountID string) ([]byte, error) {
+	secret, err := keychainGet(accountID + "/" + keychainSessionSecret)
+	if err == nil {
+		return []byte(secret), nil
+	}
+
+	// Generate new secret
+	secret = generateRandomString(32)
+	if err := keychainSet(accountID+"/"+keychainSessionSecret, secret); err != nil {
+		return nil, fmt.Errorf("failed to store session secret: %w", err)
+	}
+	return []byte(secret), nil
+}
+
+func generateRandomString(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)[:n]
 }
