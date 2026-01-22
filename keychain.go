@@ -1,7 +1,7 @@
 package main
 
 /*
-#cgo LDFLAGS: -framework Security -framework CoreFoundation
+#cgo LDFLAGS: -framework Security -framework CoreFoundation -framework LocalAuthentication -framework Foundation -L${SRCDIR} -ltouchid
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
@@ -13,6 +13,13 @@ package main
 static CFStringRef createCFString(const char *s) {
     return CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
 }
+
+// Note: We use the legacy SecAccess/SecTrustedApplication APIs because they're
+// the only way to set app-specific ACLs for Developer ID signed CLI tools.
+// The modern Data Protection Keychain requires App Store entitlements.
+// These APIs are deprecated but still functional.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 // Get path to current executable
 static char* getExecutablePath() {
@@ -58,6 +65,11 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 
     return access;
 }
+
+#pragma clang diagnostic pop
+
+// Defined in touchid.m, linked via libtouchid.a
+extern int authenticateTouchID(const char *reason);
 
 // Add or update a keychain item with app-only access
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
@@ -153,7 +165,6 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 import "C"
 import (
 	"fmt"
-	"os/exec"
 	"unsafe"
 )
 
@@ -246,32 +257,12 @@ func GetCredentials(accountID string) (secretKey, masterPassword string, err err
 	return secretKey, masterPassword, nil
 }
 
-// AuthenticateBiometric prompts for Touch ID or password using LAContext via Swift.
+// AuthenticateBiometric prompts for Touch ID or password using LAContext.
 func AuthenticateBiometric(accountID, reason string) error {
-	// Use swift to run LAContext - it handles the async API properly
-	script := fmt.Sprintf(`
-import LocalAuthentication
-import Foundation
+	cReason := C.CString(reason)
+	defer C.free(unsafe.Pointer(cReason))
 
-let context = LAContext()
-let semaphore = DispatchSemaphore(value: 0)
-var success = false
-
-let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
-    ? .deviceOwnerAuthenticationWithBiometrics
-    : .deviceOwnerAuthentication
-
-context.evaluatePolicy(policy, localizedReason: "%s") { result, error in
-    success = result
-    semaphore.signal()
-}
-
-semaphore.wait()
-exit(success ? 0 : 1)
-`, reason)
-
-	cmd := exec.Command("swift", "-e", script)
-	if err := cmd.Run(); err != nil {
+	if C.authenticateTouchID(cReason) != 0 {
 		return fmt.Errorf("authentication failed or cancelled")
 	}
 	return nil
