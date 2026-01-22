@@ -54,6 +54,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "signin":
+		if err := cmdSignin(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "signout":
+		if err := cmdSignout(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -64,20 +74,17 @@ func printUsage() {
 	fmt.Println("opcli - Fast 1Password CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
+	fmt.Println("  opcli signin                        - Store credentials in Keychain")
+	fmt.Println("  opcli signout                       - Remove credentials from Keychain")
 	fmt.Println("  opcli read <op://vault/item/field>  - Read a field from an item")
 	fmt.Println("  opcli list                          - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>         - Dump item as JSON")
 	fmt.Println("  opcli unlock                        - Test unlock (verify credentials)")
-	fmt.Println("  opcli daemon                        - Start credential daemon")
+	fmt.Println("  opcli daemon                        - Start credential daemon (legacy)")
 	fmt.Println()
-	fmt.Println("Environment variables:")
-	fmt.Println("  OP_SECRET_KEY      - Your 1Password Secret Key (A3-XXXXX-...)")
-	fmt.Println("  OP_MASTER_PASSWORD - Your master password")
-	fmt.Println()
-	fmt.Println("Security note:")
-	fmt.Println("  The unlock UX is WIP. The daemon is NOT secure against malicious")
-	fmt.Println("  processes on your machine - any process running as your user can")
-	fmt.Println("  request credentials. For high-security use, enter credentials manually.")
+	fmt.Println("Sessions:")
+	fmt.Println("  After signin, each terminal requires biometric auth (Touch ID) on first")
+	fmt.Println("  access. Sessions last 10 minutes of inactivity, max 12 hours total.")
 }
 
 func cmdUnlock() error {
@@ -129,22 +136,162 @@ func parseOPURI(uri string) (vault, item, field string, err error) {
 	return parts[0], parts[1], parts[2], nil
 }
 
-// getCredentials prompts for master password and secret key
+func cmdSignin() error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	account, err := getAccount(db)
+	if err != nil {
+		return err
+	}
+	db.Close()
+
+	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, account.UserName)
+
+	var password, secretKey string
+
+	// Try daemon first for convenience during testing
+	if pw, sk, ok := getCredentialsFromDaemon(); ok {
+		password, secretKey = pw, sk
+		fmt.Fprintln(os.Stderr, "(using credentials from daemon)")
+	} else {
+		// Get secret key
+		fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
+		skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("failed to read secret key: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		secretKey = strings.TrimSpace(string(skBytes))
+
+		// Get master password
+		fmt.Fprint(os.Stderr, "Enter Master Password: ")
+		pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("failed to read password: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		password = string(pwBytes)
+	}
+
+	// Verify credentials work before storing
+	fmt.Fprintln(os.Stderr, "Verifying credentials...")
+	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+	if err != nil {
+		return fmt.Errorf("invalid credentials: %w", err)
+	}
+	vk.Close()
+
+	// Store in keychain
+	if err := StoreCredentials(account.UserEmail, secretKey, password); err != nil {
+		return fmt.Errorf("failed to store credentials: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr, "Credentials stored in Keychain.")
+	fmt.Fprintln(os.Stderr, "Use Touch ID to authenticate in each new terminal session.")
+	return nil
+}
+
+func cmdSignout() error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	account, err := getAccount(db)
+	if err != nil {
+		return err
+	}
+	db.Close()
+
+	if err := DeleteCredentials(account.UserEmail); err != nil {
+		return fmt.Errorf("failed to delete credentials: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Signed out of %s\n", account.UserEmail)
+	return nil
+}
+
+// getCredentials gets credentials, using session-based auth if available.
 func getCredentials() (password, secretKey string, err error) {
-	// Try daemon first
+	// Try daemon first (legacy)
 	if pw, sk, ok := getCredentialsFromDaemon(); ok {
 		return pw, sk, nil
 	}
 
 	// Check for environment variables
+	envSecretKey := os.Getenv("OP_SECRET_KEY")
+	envPassword := os.Getenv("OP_MASTER_PASSWORD")
+	if envSecretKey != "" && envPassword != "" {
+		return envPassword, envSecretKey, nil
+	}
+
+	// Try session-based auth
+	db, err := openDB()
+	if err != nil {
+		return "", "", err
+	}
+	account, err := getAccount(db)
+	db.Close()
+	if err != nil {
+		return "", "", err
+	}
+
+	// Check for existing valid session
+	session, err := GetValidSession(account.UserEmail)
+	if err != nil {
+		// Session error, fall through to prompt
+	}
+
+	if session == nil {
+		// No valid session - need to authenticate
+		// First check if we have credentials in keychain
+		sk, pw, err := GetCredentials(account.UserEmail)
+		if err != nil {
+			// No stored credentials - prompt manually
+			return getCredentialsManual()
+		}
+
+		// Have stored credentials - require biometric auth
+		if err := AuthenticateBiometric(account.UserEmail, "access your 1Password credentials"); err != nil {
+			return "", "", fmt.Errorf("authentication failed: %w", err)
+		}
+
+		// Create session
+		if _, err := CreateSession(account.UserEmail); err != nil {
+			// Non-fatal, continue without session
+			fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
+		}
+
+		return pw, sk, nil
+	}
+
+	// Have valid session - get credentials without biometric
+	sk, pw, err := GetCredentials(account.UserEmail)
+	if err != nil {
+		return "", "", fmt.Errorf("credentials not found (run 'opcli signin' first): %w", err)
+	}
+
+	return pw, sk, nil
+}
+
+// getCredentialsManual prompts for credentials without using keychain/sessions.
+func getCredentialsManual() (password, secretKey string, err error) {
 	secretKey = os.Getenv("OP_SECRET_KEY")
 	password = os.Getenv("OP_MASTER_PASSWORD")
 
 	if secretKey == "" {
 		fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-		var sk string
-		fmt.Scanln(&sk)
-		secretKey = strings.TrimSpace(sk)
+		skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return "", "", fmt.Errorf("failed to read secret key: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		secretKey = strings.TrimSpace(string(skBytes))
 	}
 
 	if password == "" {
