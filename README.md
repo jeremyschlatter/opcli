@@ -32,10 +32,23 @@ Or build from source:
 go build -o opcli .
 ```
 
+### Code Signing (required for Touch ID)
+
+For Touch ID support, the binary must be signed with a Developer ID:
+
+```bash
+codesign --sign "Developer ID Application: Your Name (TEAMID)" --options runtime opcli
+```
+
+Without code signing, you can still use environment variables or the daemon for authentication.
+
 ## Usage
 
 ```bash
-# Read a field from an item
+# First time: sign in (stores credentials in Keychain)
+opcli signin
+
+# Read a field from an item (prompts Touch ID on first use per terminal)
 opcli read "op://VaultName/ItemName/fieldname"
 
 # List all vaults
@@ -44,41 +57,31 @@ opcli list
 # Dump an item as JSON
 opcli get "op://VaultName/ItemName"
 
-# Test unlock (verify credentials work)
-opcli unlock
-
-# Start credential daemon (for fast repeated access)
-opcli daemon
+# Remove credentials from Keychain
+opcli signout
 ```
 
-### Credential Daemon
+### Touch ID & Sessions
 
-To avoid entering your master password on every command, run the daemon:
+After running `opcli signin`, your credentials are stored in the macOS Keychain with an app-only ACL (only the signed `opcli` binary can read them).
 
-```bash
-# Terminal 1: Start daemon (enter credentials once)
-opcli daemon
+Each terminal session requires Touch ID authentication on first access. After authenticating:
+- The session lasts for **10 minutes of inactivity**
+- Hard limit of **12 hours** before re-authentication is required
+- Each terminal window/tab has its own session
 
-# Terminal 2: Commands now work without prompts
-opcli read "op://Personal/github.com/password"
-```
+This mirrors the UX of the official `op` CLI's desktop app integration.
 
-## Configuration
+### Legacy: Environment Variables
 
-Set these environment variables to avoid prompts:
+You can also set these environment variables (less secure):
 
 - `OP_SECRET_KEY` - Your 1Password Secret Key (A3-XXXXX-...)
-- `OP_MASTER_PASSWORD` - Your master password (not recommended for security)
+- `OP_MASTER_PASSWORD` - Your master password
 
-## Security Warning
+### Legacy: Credential Daemon
 
-**The unlock UX is a work in progress.** The current daemon implementation:
-
-- Stores your master password in memory (protected by [memguard](https://github.com/awnumar/memguard))
-- Authenticates requests via a token file (`~/.opcli/opcli.token`)
-- **Is NOT secure against malicious processes on your machine** - any process running as your user can read the token file and request your credentials
-
-For high-security environments, enter credentials manually each time or use the official `op` CLI with biometric unlock.
+The `opcli daemon` command is still available for cases where Touch ID isn't suitable, but `opcli signin` is recommended.
 
 ## Requirements
 
@@ -125,7 +128,17 @@ Both paths have strong caller validation:
 - **XPC path**: Requires AgileBits Team ID signature
 - **BrowserSupport path**: Requires parent process to be an approved browser
 
-Third-party tools cannot integrate with the 1Password desktop app for Touch ID unlock. The daemon-based approach (enter password once, cache credentials) is the best available option for opcli.
+Third-party tools cannot integrate with the 1Password desktop app for Touch ID unlock.
+
+### Our Solution
+
+Instead of integrating with the 1Password app, opcli implements its own Touch ID flow:
+
+1. `opcli signin` stores credentials in the macOS Keychain with an app-only ACL
+2. On first access per terminal, Touch ID is triggered via LAContext
+3. Sessions (10 min inactivity / 12 hr max) prevent repeated prompts
+
+This provides a similar UX to the official `op` CLI without requiring desktop app integration.
 
 ## License
 
