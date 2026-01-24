@@ -1,5 +1,4 @@
 opcli
 .env
-.envrc
 *.o
 *.a
