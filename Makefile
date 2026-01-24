@@ -9,6 +9,9 @@
 #   make SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 SIGN_IDENTITY ?=
 
+# Version can be set via command line or defaults to git describe
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+
 .PHONY: all clean sign
 
 all: opcli
@@ -21,7 +24,7 @@ libtouchid.a: touchid.m
 
 # Build Go binary (requires libtouchid.a)
 opcli: libtouchid.a *.go go.mod go.sum
-	go build -o opcli .
+	go build -ldflags "-X main.Version=$(VERSION)" -o opcli .
 
 # Sign the binary (required for Touch ID and Keychain ACL)
 sign: opcli

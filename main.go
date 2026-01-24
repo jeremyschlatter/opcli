@@ -14,6 +14,9 @@ import (
 	"golang.org/x/term"
 )
 
+// Version is set at build time via -ldflags
+var Version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -64,6 +67,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "version", "--version", "-v":
+		fmt.Printf("opcli %s\n", Version)
 	default:
 		printUsage()
 		os.Exit(1)
