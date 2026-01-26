@@ -87,11 +87,48 @@ type DecryptedItem struct {
 }
 
 type Field struct {
+	// Standard format (login items, etc.)
 	ID          string `json:"id,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Value       string `json:"value,omitempty"`
 	Designation string `json:"designation,omitempty"`
+
+	// Alternate format (section fields)
+	T string `json:"t,omitempty"` // title/label
+	N string `json:"n,omitempty"` // internal name/id
+	K string `json:"k,omitempty"` // kind (string, concealed, etc.)
+	V string `json:"v,omitempty"` // value
+}
+
+// FieldLabel returns the user-visible label for the field.
+func (f *Field) FieldLabel() string {
+	if f.T != "" {
+		return f.T
+	}
+	if f.Name != "" {
+		return f.Name
+	}
+	return f.ID
+}
+
+// FieldID returns the internal ID for the field.
+func (f *Field) FieldID() string {
+	if f.N != "" {
+		return f.N
+	}
+	if f.ID != "" {
+		return f.ID
+	}
+	return f.Name
+}
+
+// FieldValue returns the value of the field.
+func (f *Field) FieldValue() string {
+	if f.V != "" {
+		return f.V
+	}
+	return f.Value
 }
 
 type Section struct {

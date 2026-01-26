@@ -123,6 +123,7 @@ func printUsage() {
 	fmt.Println("  opcli signin [--account <acct>]      - Store credentials in Keychain")
 	fmt.Println("  opcli signout [--account <acct>]     - Remove credentials from Keychain")
 	fmt.Println("  opcli read <op://vault/item/field>   - Read a field from an item")
+	fmt.Println("  opcli read <op://vault/item/section/field>")
 	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
 	fmt.Println("  opcli account list                   - List all accounts")
@@ -726,18 +727,21 @@ func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedDa
 	return &item, nil
 }
 
-// parseOPURI parses an op://vault/item/field URI
-func parseOPURI(uri string) (vault, item, field string, err error) {
+// parseOPURI parses an op://vault/item/[section/]field URI
+func parseOPURI(uri string) (vault, item, section, field string, err error) {
 	if !strings.HasPrefix(uri, "op://") {
-		return "", "", "", fmt.Errorf("invalid URI: must start with op://")
+		return "", "", "", "", fmt.Errorf("invalid URI: must start with op://")
 	}
 
 	parts := strings.Split(uri[5:], "/")
 	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("invalid URI: must be op://vault/item/field")
+		return "", "", "", "", fmt.Errorf("invalid URI: must be op://vault/item/field or op://vault/item/section/field")
 	}
 
-	return parts[0], parts[1], parts[2], nil
+	if len(parts) == 3 {
+		return parts[0], parts[1], "", parts[2], nil
+	}
+	return parts[0], parts[1], parts[2], parts[3], nil
 }
 
 // openVaultKeychain is a helper to resolve account, get credentials, and open keychain.
@@ -780,7 +784,7 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 }
 
 func cmdRead(uri string, accountFlag string) error {
-	vaultName, itemName, fieldName, err := parseOPURI(uri)
+	vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return err
 	}
@@ -875,33 +879,113 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 
 	// Find the field
-	fieldLower := strings.ToLower(fieldName)
+	value, err := findField(decryptedItem, sectionName, fieldName)
+	if err != nil {
+		return err
+	}
 
-	// Check top-level fields
-	for _, f := range decryptedItem.Fields {
-		name := strings.ToLower(f.Name)
-		id := strings.ToLower(f.ID)
-		designation := strings.ToLower(f.Designation)
-		if name == fieldLower || id == fieldLower || designation == fieldLower {
-			fmt.Println(f.Value)
-			return nil
+	fmt.Println(value)
+	return nil
+}
+
+// fieldMatches checks if a field matches the given name (case-insensitive).
+func fieldMatches(f *Field, name string) bool {
+	lower := strings.ToLower(name)
+	return strings.ToLower(f.FieldLabel()) == lower ||
+		strings.ToLower(f.FieldID()) == lower ||
+		strings.ToLower(f.Designation) == lower ||
+		strings.ToLower(f.Name) == lower ||
+		strings.ToLower(f.ID) == lower
+}
+
+// sectionMatches checks if a section matches the given name (case-insensitive).
+func sectionMatches(s *Section, name string) bool {
+	lower := strings.ToLower(name)
+	return strings.ToLower(s.Name) == lower || strings.ToLower(s.Title) == lower
+}
+
+// findField searches for a field in the decrypted item.
+// If sectionName is specified, only searches that section.
+// If sectionName is empty, searches everywhere but requires unambiguous match.
+func findField(item *DecryptedItem, sectionName, fieldName string) (string, error) {
+	type match struct {
+		value   string
+		section string // empty for top-level
+	}
+	var matches []match
+
+	// If section specified, only search that section
+	if sectionName != "" {
+		for i := range item.Sections {
+			s := &item.Sections[i]
+			if !sectionMatches(s, sectionName) {
+				continue
+			}
+			for j := range s.Fields {
+				f := &s.Fields[j]
+				if fieldMatches(f, fieldName) {
+					return f.FieldValue(), nil
+				}
+			}
+			return "", fmt.Errorf("field not found in section %q: %s", sectionName, fieldName)
+		}
+		return "", fmt.Errorf("section not found: %s", sectionName)
+	}
+
+	// No section specified - search everywhere
+	// Check top-level fields first
+	for i := range item.Fields {
+		f := &item.Fields[i]
+		if fieldMatches(f, fieldName) {
+			matches = append(matches, match{value: f.FieldValue(), section: ""})
 		}
 	}
 
 	// Check sections
-	for _, s := range decryptedItem.Sections {
-		for _, f := range s.Fields {
-			name := strings.ToLower(f.Name)
-			id := strings.ToLower(f.ID)
-			designation := strings.ToLower(f.Designation)
-			if name == fieldLower || id == fieldLower || designation == fieldLower {
-				fmt.Println(f.Value)
-				return nil
+	for i := range item.Sections {
+		s := &item.Sections[i]
+		sectionLabel := s.Title
+		if sectionLabel == "" {
+			sectionLabel = s.Name
+		}
+		for j := range s.Fields {
+			f := &s.Fields[j]
+			if fieldMatches(f, fieldName) {
+				matches = append(matches, match{value: f.FieldValue(), section: sectionLabel})
 			}
 		}
 	}
 
-	return fmt.Errorf("field not found: %s", fieldName)
+	if len(matches) == 0 {
+		return "", fmt.Errorf("field not found: %s", fieldName)
+	}
+
+	if len(matches) == 1 {
+		return matches[0].value, nil
+	}
+
+	// Multiple matches - check if they all have the same value
+	allSame := true
+	for _, m := range matches[1:] {
+		if m.value != matches[0].value {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		return matches[0].value, nil
+	}
+
+	// Ambiguous - list where the field was found
+	var locations []string
+	for _, m := range matches {
+		if m.section == "" {
+			locations = append(locations, "(top-level)")
+		} else {
+			locations = append(locations, fmt.Sprintf("section %q", m.section))
+		}
+	}
+	return "", fmt.Errorf("field %q is ambiguous, found in: %s", fieldName, strings.Join(locations, ", "))
 }
 
 func cmdList(accountFlag string) error {
