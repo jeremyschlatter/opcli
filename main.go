@@ -826,7 +826,8 @@ func cmdRead(uri string, accountFlag string) error {
 			continue
 		}
 
-		if strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
+		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
 			targetVaultUUID = v.VaultUUID
 			break
 		}
@@ -886,6 +887,19 @@ func cmdRead(uri string, accountFlag string) error {
 
 	fmt.Println(value)
 	return nil
+}
+
+// vaultDisplayName returns the display name for a vault.
+// Special vault types have hardcoded display names that override the stored name.
+func vaultDisplayName(vaultType, storedName string) string {
+	switch vaultType {
+	case "P":
+		return "Private"
+	case "E":
+		return "Employee"
+	default:
+		return storedName
+	}
 }
 
 // fieldMatches checks if a field matches the given name (case-insensitive).
@@ -1028,7 +1042,8 @@ func cmdList(accountFlag string) error {
 			continue
 		}
 
-		fmt.Printf("  %s (%s)\n", attrs.Name, v.VaultUUID)
+		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		fmt.Printf("  %s (%s)\n", displayName, v.VaultUUID)
 	}
 
 	return nil
@@ -1077,7 +1092,8 @@ func cmdGet(uri string, accountFlag string) error {
 		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
 			continue
 		}
-		if strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
+		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
 			targetVaultUUID = v.VaultUUID
 			break
 		}
