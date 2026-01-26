@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strings"
 
 	"golang.org/x/term"
@@ -1035,7 +1036,12 @@ func cmdList(accountFlag string) error {
 		return err
 	}
 
-	fmt.Println("Vaults:")
+	type vaultEntry struct {
+		name string
+		uuid string
+	}
+	var entries []vaultEntry
+
 	for _, v := range vaults {
 		// Hide System vaults (like op does)
 		if v.VaultType == "S" {
@@ -1044,19 +1050,19 @@ func cmdList(accountFlag string) error {
 
 		var encAttrs EncryptedData
 		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-			fmt.Printf("  %s (failed to parse attrs)\n", v.VaultUUID)
+			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to parse attrs)", v.VaultUUID})
 			continue
 		}
 
 		key, err := vk.getVaultKey(v.VaultUUID)
 		if err != nil {
-			fmt.Printf("  %s (failed to get key)\n", v.VaultUUID)
+			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to get key)", v.VaultUUID})
 			continue
 		}
 
 		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
 		if err != nil {
-			fmt.Printf("  %s (failed to decrypt)\n", v.VaultUUID)
+			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to decrypt)", v.VaultUUID})
 			continue
 		}
 
@@ -1064,12 +1070,21 @@ func cmdList(accountFlag string) error {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-			fmt.Printf("  %s (failed to parse decrypted)\n", v.VaultUUID)
+			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to parse decrypted)", v.VaultUUID})
 			continue
 		}
 
 		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
-		fmt.Printf("  %s (%s)\n", displayName, v.VaultUUID)
+		entries = append(entries, vaultEntry{displayName, v.VaultUUID})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return strings.ToLower(entries[i].name) < strings.ToLower(entries[j].name)
+	})
+
+	fmt.Println("Vaults:")
+	for _, e := range entries {
+		fmt.Printf("  %s (%s)\n", e.name, e.uuid)
 	}
 
 	return nil
