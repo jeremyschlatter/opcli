@@ -50,6 +50,7 @@ type AccountInfo struct {
 	AccountUUID string // 1Password account UUID
 	Email       string
 	URL         string
+	AccountType string // I=Individual, F=Family, T=Teams, B=Business
 }
 
 // getAccounts retrieves all accounts from the database.
@@ -57,7 +58,8 @@ func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 	rows, err := db.Query(`
 		SELECT id, account_uuid,
 		       json_extract(data, '$.user_email'),
-		       json_extract(data, '$.sign_in_url')
+		       json_extract(data, '$.sign_in_url'),
+		       json_extract(data, '$.account_type')
 		FROM accounts
 	`)
 	if err != nil {
@@ -68,12 +70,13 @@ func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 	var accounts []AccountInfo
 	for rows.Next() {
 		var a AccountInfo
-		var email, url sql.NullString
-		if err := rows.Scan(&a.ID, &a.AccountUUID, &email, &url); err != nil {
+		var email, url, accountType sql.NullString
+		if err := rows.Scan(&a.ID, &a.AccountUUID, &email, &url, &accountType); err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
 		}
 		a.Email = email.String
 		a.URL = url.String
+		a.AccountType = accountType.String
 		accounts = append(accounts, a)
 	}
 	return accounts, nil

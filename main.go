@@ -332,7 +332,7 @@ func cmdSignin(accountFlag string) error {
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID)
+	vk, err := newVaultKeychain(password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID, dbAccount.AccountType)
 	if err != nil {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
@@ -453,6 +453,7 @@ func getCredentialsManual() (password, secretKey string, err error) {
 type VaultKeychain struct {
 	db              *DB
 	accountID       int64                        // internal DB account ID
+	accountType     string                       // I=Individual, F=Family, T=Teams, B=Business
 	primaryKeysetID string                       // UUID of the primary keyset
 	primarySymKey   []byte                       // Decrypted primary symmetric key
 	keysetRSAKeys   map[string]*rsa.PrivateKey   // keyset UUID -> RSA private key
@@ -464,7 +465,7 @@ type DB struct {
 	*sql.DB
 }
 
-func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64) (*VaultKeychain, error) {
+func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
 	db, err := openDB()
 	if err != nil {
 		return nil, err
@@ -473,6 +474,7 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 	vk := &VaultKeychain{
 		db:            &DB{db},
 		accountID:     accountID,
+		accountType:   accountType,
 		keysetRSAKeys: make(map[string]*rsa.PrivateKey),
 		keysetSymKeys: make(map[string][]byte),
 		vaultKeys:     make(map[string][]byte),
@@ -768,19 +770,32 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 		return nil, err
 	}
 
-	// Open database and get account ID
+	// Open database and get account info
 	db, err := openDB()
 	if err != nil {
 		return nil, err
 	}
-	accountID, err := getAccountIDByUUID(db, accountUUID)
+	accounts, err := getAccounts(db)
 	db.Close()
 	if err != nil {
 		return nil, err
 	}
 
+	var accountID int64
+	var accountType string
+	for _, a := range accounts {
+		if a.AccountUUID == accountUUID {
+			accountID = a.ID
+			accountType = a.AccountType
+			break
+		}
+	}
+	if accountID == 0 {
+		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
+	}
+
 	// Initialize keychain
-	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID)
+	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType)
 }
 
 func cmdRead(uri string, accountFlag string) error {
@@ -826,7 +841,7 @@ func cmdRead(uri string, accountFlag string) error {
 			continue
 		}
 
-		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
 		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
 			targetVaultUUID = v.VaultUUID
 			break
@@ -891,14 +906,17 @@ func cmdRead(uri string, accountFlag string) error {
 
 // vaultDisplayName returns the display name for a vault.
 // The personal vault (type P) has special display names based on account type:
-// - Personal account: stored as "Personal" → displayed as "Private"
-// - Org account: stored as "Private" → displayed as "Employee"
-func vaultDisplayName(vaultType, storedName string) string {
+// - Individual (I): "Personal"
+// - Family (F): "Private"
+// - Teams/Business (T/B): "Employee"
+func vaultDisplayName(vaultType, accountType, storedName string) string {
 	if vaultType == "P" {
-		switch storedName {
-		case "Personal":
+		switch accountType {
+		case "I":
+			return "Personal"
+		case "F":
 			return "Private"
-		case "Private":
+		case "T", "B":
 			return "Employee"
 		}
 	}
@@ -1019,6 +1037,11 @@ func cmdList(accountFlag string) error {
 
 	fmt.Println("Vaults:")
 	for _, v := range vaults {
+		// Hide System vaults (like op does)
+		if v.VaultType == "S" {
+			continue
+		}
+
 		var encAttrs EncryptedData
 		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
 			fmt.Printf("  %s (failed to parse attrs)\n", v.VaultUUID)
@@ -1045,7 +1068,7 @@ func cmdList(accountFlag string) error {
 			continue
 		}
 
-		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
 		fmt.Printf("  %s (%s)\n", displayName, v.VaultUUID)
 	}
 
@@ -1095,7 +1118,7 @@ func cmdGet(uri string, accountFlag string) error {
 		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
 			continue
 		}
-		displayName := vaultDisplayName(v.VaultType, attrs.Name)
+		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
 		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
 			targetVaultUUID = v.VaultUUID
 			break
