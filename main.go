@@ -890,16 +890,19 @@ func cmdRead(uri string, accountFlag string) error {
 }
 
 // vaultDisplayName returns the display name for a vault.
-// Special vault types have hardcoded display names that override the stored name.
+// The personal vault (type P) has special display names based on account type:
+// - Personal account: stored as "Personal" → displayed as "Private"
+// - Org account: stored as "Private" → displayed as "Employee"
 func vaultDisplayName(vaultType, storedName string) string {
-	switch vaultType {
-	case "P":
-		return "Private"
-	case "E":
-		return "Employee"
-	default:
-		return storedName
+	if vaultType == "P" {
+		switch storedName {
+		case "Personal":
+			return "Private"
+		case "Private":
+			return "Employee"
+		}
 	}
+	return storedName
 }
 
 // fieldMatches checks if a field matches the given name (case-insensitive).
