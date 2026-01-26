@@ -38,11 +38,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "unlock":
-		if err := cmdUnlock(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
 	case "get":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: opcli get <op://vault/item>")
@@ -84,48 +79,12 @@ func printUsage() {
 	fmt.Println("  opcli read <op://vault/item/field>  - Read a field from an item")
 	fmt.Println("  opcli list                          - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>         - Dump item as JSON")
-	fmt.Println("  opcli unlock                        - Test unlock (verify credentials)")
-	fmt.Println("  opcli daemon                        - Start credential daemon (legacy)")
 	fmt.Println()
 	fmt.Println("Sessions:")
 	fmt.Println("  After signin, each terminal requires biometric auth (Touch ID) on first")
 	fmt.Println("  access. Sessions last 10 minutes of inactivity, max 12 hours total.")
 }
 
-func cmdUnlock() error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	account, err := getAccount(db)
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "Account: %s (%s)\n", account.UserEmail, account.UserName)
-	db.Close()
-
-	password, secretKey, err := getCredentials()
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintln(os.Stderr, "Unlocking vault...")
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
-	if err != nil {
-		return err
-	}
-	defer vk.Close()
-
-	fmt.Fprintln(os.Stderr, "Successfully unlocked!")
-	fmt.Fprintf(os.Stderr, "Primary key length: %d bytes\n", len(vk.primarySymKey))
-	primaryRSA := vk.keysetRSAKeys[vk.primaryKeysetID]
-	fmt.Fprintf(os.Stderr, "RSA key size: %d bits\n", primaryRSA.N.BitLen())
-
-	return nil
-}
 
 // parseOPURI parses an op://vault/item/field URI
 func parseOPURI(uri string) (vault, item, field string, err error) {
