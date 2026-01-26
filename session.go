@@ -146,7 +146,7 @@ func GetValidSession(accountID string) (*Session, error) {
 	}
 
 	// Verify MAC using Keychain secret (only opcli can read this)
-	secret, err := GetSessionSecret(accountID)
+	secret, err := GetSessionSecret()
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func CreateSession(accountID string) (*Session, error) {
 	}
 
 	// Get or create session secret from Keychain
-	secret, err := GetSessionSecret(accountID)
+	secret, err := GetSessionSecret()
 	if err != nil {
 		return nil, err
 	}

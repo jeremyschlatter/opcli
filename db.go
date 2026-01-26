@@ -44,10 +44,45 @@ func openDB() (*sql.DB, error) {
 	return db, nil
 }
 
-// getAccount retrieves the account data
-func getAccount(db *sql.DB) (*Account, error) {
+// AccountInfo holds basic info for account selection.
+type AccountInfo struct {
+	ID          int64  // internal DB id
+	AccountUUID string // 1Password account UUID
+	Email       string
+	URL         string
+}
+
+// getAccounts retrieves all accounts from the database.
+func getAccounts(db *sql.DB) ([]AccountInfo, error) {
+	rows, err := db.Query(`
+		SELECT id, account_uuid,
+		       json_extract(data, '$.user_email'),
+		       json_extract(data, '$.sign_in_url')
+		FROM accounts
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query accounts: %w", err)
+	}
+	defer rows.Close()
+
+	var accounts []AccountInfo
+	for rows.Next() {
+		var a AccountInfo
+		var email, url sql.NullString
+		if err := rows.Scan(&a.ID, &a.AccountUUID, &email, &url); err != nil {
+			return nil, fmt.Errorf("failed to scan account: %w", err)
+		}
+		a.Email = email.String
+		a.URL = url.String
+		accounts = append(accounts, a)
+	}
+	return accounts, nil
+}
+
+// getAccount retrieves account data by UUID.
+func getAccount(db *sql.DB, accountUUID string) (*Account, error) {
 	var data []byte
-	err := db.QueryRow("SELECT data FROM accounts LIMIT 1").Scan(&data)
+	err := db.QueryRow("SELECT data FROM accounts WHERE account_uuid = ?", accountUUID).Scan(&data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query account: %w", err)
 	}
@@ -60,15 +95,26 @@ func getAccount(db *sql.DB) (*Account, error) {
 	return &account, nil
 }
 
-// getPrimaryKeyset retrieves the primary keyset (encrypted by master password)
-func getPrimaryKeyset(db *sql.DB) (*Keyset, error) {
+// getAccountIDByUUID gets the internal account ID from UUID.
+func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
+	var id int64
+	err := db.QueryRow("SELECT id FROM accounts WHERE account_uuid = ?", accountUUID).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("account not found: %s", accountUUID)
+	}
+	return id, nil
+}
+
+// getPrimaryKeyset retrieves the primary keyset (encrypted by master password) for an account.
+func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 	var data []byte
 	err := db.QueryRow(`
 		SELECT data FROM account_objects
-		WHERE object_type = 'keyset'
+		WHERE account_id = ?
+		AND object_type = 'keyset'
 		AND json_extract(data, '$.encrypted_by') = 'mp'
 		LIMIT 1
-	`).Scan(&data)
+	`, accountID).Scan(&data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query primary keyset: %w", err)
 	}
@@ -81,13 +127,13 @@ func getPrimaryKeyset(db *sql.DB) (*Keyset, error) {
 	return &keyset, nil
 }
 
-// getKeyset retrieves a keyset by UUID
-func getKeyset(db *sql.DB, uuid string) (*Keyset, error) {
+// getKeyset retrieves a keyset by UUID for an account.
+func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 	var data []byte
 	err := db.QueryRow(`
 		SELECT data FROM account_objects
-		WHERE object_type = 'keyset' AND uuid = ?
-	`, uuid).Scan(&data)
+		WHERE account_id = ? AND object_type = 'keyset' AND uuid = ?
+	`, accountID, uuid).Scan(&data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query keyset %s: %w", uuid, err)
 	}
@@ -100,11 +146,11 @@ func getKeyset(db *sql.DB, uuid string) (*Keyset, error) {
 	return &keyset, nil
 }
 
-// getVaults retrieves all vaults
-func getVaults(db *sql.DB) ([]Vault, error) {
+// getVaults retrieves all vaults for an account.
+func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
 	rows, err := db.Query(`
-		SELECT data FROM account_objects WHERE object_type = 'vault'
-	`)
+		SELECT data FROM account_objects WHERE account_id = ? AND object_type = 'vault'
+	`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vaults: %w", err)
 	}
@@ -127,7 +173,7 @@ func getVaults(db *sql.DB) ([]Vault, error) {
 	return vaults, nil
 }
 
-// getVaultByID retrieves a vault by its internal ID
+// getVaultByID retrieves a vault by its internal ID.
 func getVaultByID(db *sql.DB, id int64) (*Vault, error) {
 	var data []byte
 	err := db.QueryRow(`
@@ -145,13 +191,13 @@ func getVaultByID(db *sql.DB, id int64) (*Vault, error) {
 	return &vault, nil
 }
 
-// getVaultIDByUUID gets the internal vault ID from its UUID
-func getVaultIDByUUID(db *sql.DB, vaultUUID string) (int64, error) {
+// getVaultIDByUUID gets the internal vault ID from its UUID for an account.
+func getVaultIDByUUID(db *sql.DB, accountID int64, vaultUUID string) (int64, error) {
 	var id int64
 	err := db.QueryRow(`
 		SELECT id FROM account_objects
-		WHERE object_type = 'vault' AND json_extract(data, '$.vault_uuid') = ?
-	`, vaultUUID).Scan(&id)
+		WHERE account_id = ? AND object_type = 'vault' AND json_extract(data, '$.vault_uuid') = ?
+	`, accountID, vaultUUID).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("vault not found: %s", vaultUUID)
 	}

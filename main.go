@@ -23,27 +23,73 @@ func main() {
 		os.Exit(1)
 	}
 
-	switch os.Args[1] {
+	// Parse --account flag (can appear anywhere)
+	var accountFlag string
+	args := make([]string, 0, len(os.Args))
+	for i := 0; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "--account" && i+1 < len(os.Args) {
+			accountFlag = os.Args[i+1]
+			i++ // skip next arg
+		} else if strings.HasPrefix(arg, "--account=") {
+			accountFlag = strings.TrimPrefix(arg, "--account=")
+		} else {
+			args = append(args, arg)
+		}
+	}
+
+	if len(args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	cmd := args[1]
+
+	switch cmd {
+	case "account":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: opcli account <list|forget>")
+			os.Exit(1)
+		}
+		switch args[2] {
+		case "list":
+			if err := cmdAccountList(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "forget":
+			acct := accountFlag
+			if acct == "" && len(args) > 3 {
+				acct = args[3]
+			}
+			if err := cmdAccountForget(acct); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown account subcommand: %s\n", args[2])
+			os.Exit(1)
+		}
 	case "read":
-		if len(os.Args) < 3 {
+		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: opcli read <op://vault/item/field>")
 			os.Exit(1)
 		}
-		if err := cmdRead(os.Args[2]); err != nil {
+		if err := cmdRead(args[2], accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "list":
-		if err := cmdList(); err != nil {
+		if err := cmdList(accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "get":
-		if len(os.Args) < 3 {
+		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: opcli get <op://vault/item>")
 			os.Exit(1)
 		}
-		if err := cmdGet(os.Args[2]); err != nil {
+		if err := cmdGet(args[2], accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -53,12 +99,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "signin":
-		if err := cmdSignin(); err != nil {
+		if err := cmdSignin(accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "signout":
-		if err := cmdSignout(); err != nil {
+		if err := cmdSignout(accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -74,46 +120,188 @@ func printUsage() {
 	fmt.Println("opcli - Fast 1Password CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  opcli signin                        - Store credentials in Keychain")
-	fmt.Println("  opcli signout                       - Remove credentials from Keychain")
-	fmt.Println("  opcli read <op://vault/item/field>  - Read a field from an item")
-	fmt.Println("  opcli list                          - List all vaults")
-	fmt.Println("  opcli get <op://vault/item>         - Dump item as JSON")
+	fmt.Println("  opcli signin [--account <acct>]      - Store credentials in Keychain")
+	fmt.Println("  opcli signout [--account <acct>]     - Remove credentials from Keychain")
+	fmt.Println("  opcli read <op://vault/item/field>   - Read a field from an item")
+	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
+	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
+	fmt.Println("  opcli account list                   - List all accounts")
+	fmt.Println("  opcli account forget [<acct>]        - Remove an account")
+	fmt.Println()
+	fmt.Println("Account Selection:")
+	fmt.Println("  --account <shorthand|email|uuid>     - Select account (default: most recent)")
+	fmt.Println("  OP_ACCOUNT env var                   - Alternative to --account flag")
 	fmt.Println()
 	fmt.Println("Sessions:")
 	fmt.Println("  After signin, each terminal requires biometric auth (Touch ID) on first")
 	fmt.Println("  access. Sessions last 10 minutes of inactivity, max 12 hours total.")
 }
 
-
-// parseOPURI parses an op://vault/item/field URI
-func parseOPURI(uri string) (vault, item, field string, err error) {
-	if !strings.HasPrefix(uri, "op://") {
-		return "", "", "", fmt.Errorf("invalid URI: must start with op://")
+// resolveAccountUUID resolves an account identifier to a UUID.
+// If accountFlag is empty, uses OP_ACCOUNT env var or default account.
+func resolveAccountUUID(accountFlag string) (string, error) {
+	// Check --account flag
+	if accountFlag != "" {
+		_, uuid, err := ResolveAccount(accountFlag)
+		if err != nil {
+			return "", fmt.Errorf("account not found: %s (run 'opcli signin' first)", accountFlag)
+		}
+		return uuid, nil
 	}
 
-	parts := strings.Split(uri[5:], "/")
-	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("invalid URI: must be op://vault/item/field")
+	// Check OP_ACCOUNT env var
+	if envAcct := os.Getenv("OP_ACCOUNT"); envAcct != "" {
+		_, uuid, err := ResolveAccount(envAcct)
+		if err != nil {
+			return "", fmt.Errorf("account not found: %s", envAcct)
+		}
+		return uuid, nil
 	}
 
-	return parts[0], parts[1], parts[2], nil
+	// Use default account
+	uuid, err := GetDefaultAccount()
+	if err != nil {
+		return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
+	}
+	return uuid, nil
 }
 
-func cmdSignin() error {
+// selectDBAccount finds an account in the database matching the given criteria.
+// If accountFlag is empty, returns the first account that has stored credentials.
+func selectDBAccount(db *sql.DB, accountFlag string) (*AccountInfo, error) {
+	accounts, err := getAccounts(db)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(accounts) == 0 {
+		return nil, fmt.Errorf("no accounts found in 1Password database")
+	}
+
+	// If no account specified, try to find one with stored credentials
+	if accountFlag == "" {
+		// First try the default account
+		if defaultUUID, err := GetDefaultAccount(); err == nil {
+			for i := range accounts {
+				if accounts[i].AccountUUID == defaultUUID {
+					return &accounts[i], nil
+				}
+			}
+		}
+		// Otherwise return first account
+		return &accounts[0], nil
+	}
+
+	// Match by UUID, email, or URL
+	lower := strings.ToLower(accountFlag)
+	for i := range accounts {
+		a := &accounts[i]
+		if a.AccountUUID == accountFlag ||
+			strings.ToLower(a.Email) == lower ||
+			strings.Contains(strings.ToLower(a.URL), lower) {
+			return a, nil
+		}
+		// Also check shorthand from stored credentials
+		if stored, _, err := ResolveAccount(accountFlag); err == nil {
+			if stored.Email == a.Email {
+				return a, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("account not found: %s", accountFlag)
+}
+
+func cmdAccountList() error {
+	// List accounts from database
 	db, err := openDB()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	account, err := getAccount(db)
+	dbAccounts, err := getAccounts(db)
 	if err != nil {
 		return err
 	}
-	db.Close()
 
-	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, account.UserName)
+	// Get stored credentials
+	store, _ := GetStoredAccounts()
+
+	fmt.Println("Accounts in 1Password database:")
+	for _, a := range dbAccounts {
+		shorthand := ExtractShorthand(a.URL)
+		status := "(not signed in)"
+		if store != nil {
+			if stored, ok := store.Accounts[a.AccountUUID]; ok {
+				status = "(signed in)"
+				if stored.Shorthand != "" {
+					shorthand = stored.Shorthand
+				}
+			}
+			if store.Default == a.AccountUUID {
+				status = "(signed in, default)"
+			}
+		}
+		fmt.Printf("  %s: %s %s\n", shorthand, a.Email, status)
+	}
+
+	return nil
+}
+
+func cmdAccountForget(accountFlag string) error {
+	if accountFlag == "" {
+		return fmt.Errorf("specify an account to forget")
+	}
+
+	_, uuid, err := ResolveAccount(accountFlag)
+	if err != nil {
+		return err
+	}
+
+	store, err := GetStoredAccounts()
+	if err != nil {
+		return err
+	}
+
+	acct, ok := store.Accounts[uuid]
+	if !ok {
+		return fmt.Errorf("account not found: %s", accountFlag)
+	}
+
+	if err := DeleteCredentials(uuid); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Forgot account: %s (%s)\n", acct.Shorthand, acct.Email)
+	return nil
+}
+
+func cmdSignin(accountFlag string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Find account in database
+	dbAccount, err := selectDBAccount(db, accountFlag)
+	if err != nil {
+		return err
+	}
+
+	// Get full account data
+	account, err := getAccount(db, dbAccount.AccountUUID)
+	if err != nil {
+		return err
+	}
+	accountID, err := getAccountIDByUUID(db, dbAccount.AccountUUID)
+	if err != nil {
+		return err
+	}
+
+	shorthand := ExtractShorthand(account.SignInURL)
+	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, shorthand)
 
 	var password, secretKey string
 
@@ -143,14 +331,14 @@ func cmdSignin() error {
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+	vk, err := newVaultKeychain(password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID)
 	if err != nil {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
 	vk.Close()
 
 	// Store in keychain
-	if err := StoreCredentials(account.UserEmail, secretKey, password); err != nil {
+	if err := StoreCredentials(dbAccount.AccountUUID, secretKey, password, shorthand, account.UserEmail, account.SignInURL); err != nil {
 		return fmt.Errorf("failed to store credentials: %w", err)
 	}
 
@@ -159,29 +347,32 @@ func cmdSignin() error {
 	return nil
 }
 
-func cmdSignout() error {
-	db, err := openDB()
+func cmdSignout(accountFlag string) error {
+	accountUUID, err := resolveAccountUUID(accountFlag)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
 
-	account, err := getAccount(db)
+	store, err := GetStoredAccounts()
 	if err != nil {
 		return err
 	}
-	db.Close()
 
-	if err := DeleteCredentials(account.UserEmail); err != nil {
+	acct, ok := store.Accounts[accountUUID]
+	if !ok {
+		return fmt.Errorf("account not found")
+	}
+
+	if err := DeleteCredentials(accountUUID); err != nil {
 		return fmt.Errorf("failed to delete credentials: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Signed out of %s\n", account.UserEmail)
+	fmt.Fprintf(os.Stderr, "Signed out of %s\n", acct.Email)
 	return nil
 }
 
-// getCredentials gets credentials, using session-based auth if available.
-func getCredentials() (password, secretKey string, err error) {
+// getCredentials gets credentials for an account, using session-based auth if available.
+func getCredentials(accountUUID string) (password, secretKey string, err error) {
 	// Try daemon first (legacy)
 	if pw, sk, ok := getCredentialsFromDaemon(); ok {
 		return pw, sk, nil
@@ -194,39 +385,25 @@ func getCredentials() (password, secretKey string, err error) {
 		return envPassword, envSecretKey, nil
 	}
 
-	// Try session-based auth
-	db, err := openDB()
-	if err != nil {
-		return "", "", err
-	}
-	account, err := getAccount(db)
-	db.Close()
-	if err != nil {
-		return "", "", err
-	}
-
 	// Check for existing valid session
-	session, err := GetValidSession(account.UserEmail)
-	if err != nil {
-		// Session error, fall through to prompt
-	}
+	session, _ := GetValidSession(accountUUID)
 
 	if session == nil {
 		// No valid session - need to authenticate
 		// First check if we have credentials in keychain
-		sk, pw, err := GetCredentials(account.UserEmail)
+		sk, pw, err := GetCredentials(accountUUID)
 		if err != nil {
 			// No stored credentials - prompt manually
 			return getCredentialsManual()
 		}
 
 		// Have stored credentials - require biometric auth
-		if err := AuthenticateBiometric(account.UserEmail, "access your 1Password credentials"); err != nil {
+		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
 			return "", "", fmt.Errorf("authentication failed: %w", err)
 		}
 
 		// Create session
-		if _, err := CreateSession(account.UserEmail); err != nil {
+		if _, err := CreateSession(accountUUID); err != nil {
 			// Non-fatal, continue without session
 			fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
 		}
@@ -235,7 +412,7 @@ func getCredentials() (password, secretKey string, err error) {
 	}
 
 	// Have valid session - get credentials without biometric
-	sk, pw, err := GetCredentials(account.UserEmail)
+	sk, pw, err := GetCredentials(accountUUID)
 	if err != nil {
 		return "", "", fmt.Errorf("credentials not found (run 'opcli signin' first): %w", err)
 	}
@@ -274,6 +451,7 @@ func getCredentialsManual() (password, secretKey string, err error) {
 // VaultKeychain holds decrypted keys for accessing vault items
 type VaultKeychain struct {
 	db              *DB
+	accountID       int64                        // internal DB account ID
 	primaryKeysetID string                       // UUID of the primary keyset
 	primarySymKey   []byte                       // Decrypted primary symmetric key
 	keysetRSAKeys   map[string]*rsa.PrivateKey   // keyset UUID -> RSA private key
@@ -285,7 +463,7 @@ type DB struct {
 	*sql.DB
 }
 
-func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error) {
+func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64) (*VaultKeychain, error) {
 	db, err := openDB()
 	if err != nil {
 		return nil, err
@@ -293,13 +471,14 @@ func newVaultKeychain(password, secretKey, email string) (*VaultKeychain, error)
 
 	vk := &VaultKeychain{
 		db:            &DB{db},
+		accountID:     accountID,
 		keysetRSAKeys: make(map[string]*rsa.PrivateKey),
 		keysetSymKeys: make(map[string][]byte),
 		vaultKeys:     make(map[string][]byte),
 	}
 
 	// Get primary keyset
-	keyset, err := getPrimaryKeyset(db)
+	keyset, err := getPrimaryKeyset(db, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get primary keyset: %w", err)
 	}
@@ -357,7 +536,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	}
 
 	// Get the keyset
-	keyset, err := getKeyset(vk.db.DB, keysetUUID)
+	keyset, err := getKeyset(vk.db.DB, vk.accountID, keysetUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keyset %s: %w", keysetUUID, err)
 	}
@@ -464,7 +643,7 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 	}
 
 	// Get vault data
-	vaultID, err := getVaultIDByUUID(vk.db.DB, vaultUUID)
+	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, vaultUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -547,40 +726,73 @@ func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedDa
 	return &item, nil
 }
 
-func cmdRead(uri string) error {
+// parseOPURI parses an op://vault/item/field URI
+func parseOPURI(uri string) (vault, item, field string, err error) {
+	if !strings.HasPrefix(uri, "op://") {
+		return "", "", "", fmt.Errorf("invalid URI: must start with op://")
+	}
+
+	parts := strings.Split(uri[5:], "/")
+	if len(parts) < 3 {
+		return "", "", "", fmt.Errorf("invalid URI: must be op://vault/item/field")
+	}
+
+	return parts[0], parts[1], parts[2], nil
+}
+
+// openVaultKeychain is a helper to resolve account, get credentials, and open keychain.
+func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
+	// First try to resolve from stored credentials
+	accountUUID, err := resolveAccountUUID(accountFlag)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get stored account info
+	store, err := GetStoredAccounts()
+	if err != nil {
+		return nil, err
+	}
+	storedAcct, ok := store.Accounts[accountUUID]
+	if !ok {
+		return nil, fmt.Errorf("account not found in stored credentials")
+	}
+
+	// Get credentials (with session/biometric)
+	password, secretKey, err := getCredentials(accountUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Open database and get account ID
+	db, err := openDB()
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := getAccountIDByUUID(db, accountUUID)
+	db.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize keychain
+	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID)
+}
+
+func cmdRead(uri string, accountFlag string) error {
 	vaultName, itemName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return err
 	}
 
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// Get account info for email
-	account, err := getAccount(db)
-	if err != nil {
-		return err
-	}
-	db.Close()
-
-	// Get credentials
-	password, secretKey, err := getCredentials()
-	if err != nil {
-		return err
-	}
-
-	// Initialize keychain
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+	vk, err := openVaultKeychain(accountFlag)
 	if err != nil {
 		return err
 	}
 	defer vk.Close()
 
 	// Find the vault
-	vaults, err := getVaults(vk.db.DB)
+	vaults, err := getVaults(vk.db.DB, vk.accountID)
 	if err != nil {
 		return err
 	}
@@ -621,7 +833,7 @@ func cmdRead(uri string) error {
 	}
 
 	// Get vault ID
-	vaultID, err := getVaultIDByUUID(vk.db.DB, targetVaultUUID)
+	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
 	if err != nil {
 		return err
 	}
@@ -692,32 +904,14 @@ func cmdRead(uri string) error {
 	return fmt.Errorf("field not found: %s", fieldName)
 }
 
-func cmdList() error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// Get account info
-	account, err := getAccount(db)
-	if err != nil {
-		return err
-	}
-	db.Close()
-
-	password, secretKey, err := getCredentials()
-	if err != nil {
-		return err
-	}
-
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+func cmdList(accountFlag string) error {
+	vk, err := openVaultKeychain(accountFlag)
 	if err != nil {
 		return err
 	}
 	defer vk.Close()
 
-	vaults, err := getVaults(vk.db.DB)
+	vaults, err := getVaults(vk.db.DB, vk.accountID)
 	if err != nil {
 		return err
 	}
@@ -756,7 +950,7 @@ func cmdList() error {
 	return nil
 }
 
-func cmdGet(uri string) error {
+func cmdGet(uri string, accountFlag string) error {
 	// Parse URI - allow op://vault/item (without field)
 	if !strings.HasPrefix(uri, "op://") {
 		return fmt.Errorf("invalid URI: must start with op://")
@@ -767,31 +961,14 @@ func cmdGet(uri string) error {
 	}
 	vaultName, itemName := parts[0], parts[1]
 
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	account, err := getAccount(db)
-	if err != nil {
-		return err
-	}
-	db.Close()
-
-	password, secretKey, err := getCredentials()
-	if err != nil {
-		return err
-	}
-
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail)
+	vk, err := openVaultKeychain(accountFlag)
 	if err != nil {
 		return err
 	}
 	defer vk.Close()
 
-	// Find vault (same logic as cmdRead)
-	vaults, err := getVaults(vk.db.DB)
+	// Find vault
+	vaults, err := getVaults(vk.db.DB, vk.accountID)
 	if err != nil {
 		return err
 	}
@@ -826,7 +1003,7 @@ func cmdGet(uri string) error {
 		return fmt.Errorf("vault not found: %s", vaultName)
 	}
 
-	vaultID, err := getVaultIDByUUID(vk.db.DB, targetVaultUUID)
+	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
 	if err != nil {
 		return err
 	}

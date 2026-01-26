@@ -166,16 +166,32 @@ import "C"
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"unsafe"
 )
 
 const (
-	keychainService        = "opcli"
-	keychainSecretKeyLabel = "secret-key"
-	keychainPasswordLabel  = "master-password"
-	keychainSessionSecret  = "session-secret"
+	keychainService     = "opcli"
+	keychainCredentials = "credentials"
 )
+
+// CredentialStore holds all account credentials in a single keychain entry.
+type CredentialStore struct {
+	Accounts map[string]*StoredAccount `json:"accounts"` // keyed by account UUID
+	Default  string                    `json:"default"`  // UUID of default account
+}
+
+// StoredAccount holds credentials for a single account.
+type StoredAccount struct {
+	SecretKey string `json:"secret_key"`
+	Password  string `json:"password"`
+	Shorthand string `json:"shorthand"`
+	Email     string `json:"email"`
+	URL       string `json:"url"` // sign-in URL
+}
 
 // keychainSet stores a value in the keychain (no biometric)
 func keychainSet(account, password string) error {
@@ -235,33 +251,137 @@ func keychainDelete(account string) error {
 	return nil
 }
 
-// StoreCredentials stores the secret key and master password in the keychain.
-// Credentials are protected by app-only ACL (only this signed binary can read).
-func StoreCredentials(accountID, secretKey, masterPassword string) error {
-	if err := keychainSet(accountID+"/"+keychainSecretKeyLabel, secretKey); err != nil {
-		return fmt.Errorf("failed to store secret key: %w", err)
+// loadCredentialStore loads the credential store from keychain.
+func loadCredentialStore() (*CredentialStore, error) {
+	data, err := keychainGet(keychainCredentials)
+	if err != nil {
+		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
 	}
-	if err := keychainSet(accountID+"/"+keychainPasswordLabel, masterPassword); err != nil {
-		return fmt.Errorf("failed to store master password: %w", err)
+
+	var store CredentialStore
+	if err := json.Unmarshal([]byte(data), &store); err != nil {
+		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
 	}
-	return nil
+
+	if store.Accounts == nil {
+		store.Accounts = make(map[string]*StoredAccount)
+	}
+	return &store, nil
 }
 
-// GetCredentials retrieves the secret key and master password from the keychain.
-func GetCredentials(accountID string) (secretKey, masterPassword string, err error) {
-	secretKey, err = keychainGet(accountID + "/" + keychainSecretKeyLabel)
+// saveCredentialStore saves the credential store to keychain.
+func saveCredentialStore(store *CredentialStore) error {
+	data, err := json.Marshal(store)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get secret key: %w", err)
+		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
-	masterPassword, err = keychainGet(accountID + "/" + keychainPasswordLabel)
+	return keychainSet(keychainCredentials, string(data))
+}
+
+// StoreCredentials stores credentials for an account.
+// Sets this account as default if it's the first or only account.
+func StoreCredentials(accountUUID, secretKey, masterPassword, shorthand, email, signInURL string) error {
+	store, err := loadCredentialStore()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get master password: %w", err)
+		return err
 	}
-	return secretKey, masterPassword, nil
+
+	store.Accounts[accountUUID] = &StoredAccount{
+		SecretKey: secretKey,
+		Password:  masterPassword,
+		Shorthand: shorthand,
+		Email:     email,
+		URL:       signInURL,
+	}
+
+	// Set as default if first account or no default set
+	if store.Default == "" || len(store.Accounts) == 1 {
+		store.Default = accountUUID
+	}
+
+	return saveCredentialStore(store)
+}
+
+// GetCredentials retrieves credentials for an account by UUID.
+func GetCredentials(accountUUID string) (secretKey, masterPassword string, err error) {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return "", "", err
+	}
+
+	acct, ok := store.Accounts[accountUUID]
+	if !ok {
+		return "", "", fmt.Errorf("account not found: %s", accountUUID)
+	}
+
+	return acct.SecretKey, acct.Password, nil
+}
+
+// GetStoredAccounts returns all stored accounts.
+func GetStoredAccounts() (*CredentialStore, error) {
+	return loadCredentialStore()
+}
+
+// ResolveAccount finds an account by shorthand, UUID, email, or URL.
+func ResolveAccount(identifier string) (*StoredAccount, string, error) {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Check exact UUID match
+	if acct, ok := store.Accounts[identifier]; ok {
+		return acct, identifier, nil
+	}
+
+	// Check shorthand, email, or URL
+	identifier = strings.ToLower(identifier)
+	for uuid, acct := range store.Accounts {
+		if strings.ToLower(acct.Shorthand) == identifier ||
+			strings.ToLower(acct.Email) == identifier ||
+			strings.Contains(strings.ToLower(acct.URL), identifier) {
+			return acct, uuid, nil
+		}
+	}
+
+	return nil, "", fmt.Errorf("account not found: %s", identifier)
+}
+
+// GetDefaultAccount returns the default account UUID.
+func GetDefaultAccount() (string, error) {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return "", err
+	}
+
+	if store.Default == "" {
+		return "", fmt.Errorf("no default account configured")
+	}
+
+	if _, ok := store.Accounts[store.Default]; !ok {
+		return "", fmt.Errorf("default account not found")
+	}
+
+	return store.Default, nil
+}
+
+// SetDefaultAccount sets the default account.
+func SetDefaultAccount(accountUUID string) error {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return err
+	}
+
+	if _, ok := store.Accounts[accountUUID]; !ok {
+		return fmt.Errorf("account not found: %s", accountUUID)
+	}
+
+	store.Default = accountUUID
+	return saveCredentialStore(store)
 }
 
 // AuthenticateBiometric prompts for Touch ID or password using LAContext.
-func AuthenticateBiometric(accountID, reason string) error {
+func AuthenticateBiometric(reason string) error {
 	cReason := C.CString(reason)
 	defer C.free(unsafe.Pointer(cReason))
 
@@ -272,33 +392,79 @@ func AuthenticateBiometric(accountID, reason string) error {
 }
 
 // HasStoredCredentials checks if credentials exist for the account.
-func HasStoredCredentials(accountID string) bool {
-	_, err := keychainGet(accountID + "/" + keychainSecretKeyLabel)
-	return err == nil
+func HasStoredCredentials(accountUUID string) bool {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return false
+	}
+	_, ok := store.Accounts[accountUUID]
+	return ok
 }
 
-// DeleteCredentials removes credentials from the keychain.
-func DeleteCredentials(accountID string) error {
-	keychainDelete(accountID + "/" + keychainSecretKeyLabel)
-	keychainDelete(accountID + "/" + keychainPasswordLabel)
-	keychainDelete(accountID + "/" + keychainSessionSecret)
-	return nil
+// DeleteCredentials removes credentials for an account.
+func DeleteCredentials(accountUUID string) error {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return err
+	}
+
+	delete(store.Accounts, accountUUID)
+
+	// Update default if needed
+	if store.Default == accountUUID {
+		store.Default = ""
+		// Set first remaining account as default
+		for uuid := range store.Accounts {
+			store.Default = uuid
+			break
+		}
+	}
+
+	return saveCredentialStore(store)
 }
 
-// GetSessionSecret retrieves or creates the session secret for HMAC verification.
-// This secret is stored in Keychain with app-only ACL, so only opcli can read it.
-func GetSessionSecret(accountID string) ([]byte, error) {
-	secret, err := keychainGet(accountID + "/" + keychainSessionSecret)
-	if err == nil {
-		return []byte(secret), nil
+// DeleteAllCredentials removes all stored credentials.
+func DeleteAllCredentials() error {
+	return keychainDelete(keychainCredentials)
+}
+
+// GetSessionSecret retrieves or creates a session secret for HMAC verification.
+// Uses a fixed key since all accounts share the same keychain entry.
+func GetSessionSecret() ([]byte, error) {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return nil, err
 	}
 
-	// Generate new secret
-	secret = generateRandomString(32)
-	if err := keychainSet(accountID+"/"+keychainSessionSecret, secret); err != nil {
-		return nil, fmt.Errorf("failed to store session secret: %w", err)
+	// Use a hash of all account UUIDs as the secret base
+	// This changes if accounts change, invalidating old sessions
+	h := make([]byte, 32)
+	for uuid := range store.Accounts {
+		for i, b := range []byte(uuid) {
+			h[i%32] ^= b
+		}
 	}
-	return []byte(secret), nil
+	return h, nil
+}
+
+// ExtractShorthand extracts the shorthand from a sign-in URL.
+// e.g., "https://my.1password.com" -> "my"
+func ExtractShorthand(signInURL string) string {
+	u, err := url.Parse(signInURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Host
+	// Remove port if present
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	// Get subdomain (first part before .1password.com or similar)
+	parts := strings.Split(host, ".")
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return ""
 }
 
 func generateRandomString(n int) string {
