@@ -19,6 +19,9 @@ import (
 	"golang.org/x/term"
 )
 
+// testCommands is populated by test_helpers.go in test builds
+var testCommands map[string]func() error
+
 // Version is set at build time via -ldflags
 var Version = "dev"
 
@@ -49,6 +52,17 @@ func main() {
 	}
 
 	cmd := args[1]
+
+	// Check for test commands (only available in test builds)
+	if testCommands != nil {
+		if fn, ok := testCommands[cmd]; ok {
+			if err := fn(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 
 	switch cmd {
 	case "account":

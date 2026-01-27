@@ -21,6 +21,13 @@ const (
 )
 
 func getDaemonDir() (string, error) {
+	if d := os.Getenv("OPCLI_TEST_DATA_DIR"); d != "" {
+		if err := os.MkdirAll(d, 0700); err != nil {
+			return "", err
+		}
+		return d, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

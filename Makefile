@@ -47,5 +47,12 @@ ifndef SIGN_IDENTITY
 endif
 	codesign --sign "$(SIGN_IDENTITY)" --options runtime --force opcli
 
+# Sign the test binary
+sign-test: opcli-test
+ifndef SIGN_IDENTITY
+	$(error SIGN_IDENTITY is not set)
+endif
+	codesign --sign "$(SIGN_IDENTITY)" --options runtime --force opcli-test
+
 clean:
 	rm -f opcli opcli-test libtouchid.a libtouchid_stub.a touchid.o touchid_stub.o
