@@ -162,7 +162,9 @@ func TestE2E(t *testing.T) {
 	for command, tests := range allTests {
 		t.Run(command, func(t *testing.T) {
 			for _, tc := range tests {
+				tc := tc // capture for parallel
 				t.Run(tc.Name, func(t *testing.T) {
+					t.Parallel()
 					// Create temp dir for this test case
 					workDir, err := os.MkdirTemp("", "opcli-test-*")
 					if err != nil {
