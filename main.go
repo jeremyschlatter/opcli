@@ -186,28 +186,10 @@ func resolveAccountUUID(accountFlag string) (string, error) {
 
 	// Use default account from keychain
 	uuid, err := GetDefaultAccount()
-	if err == nil {
-		return uuid, nil
+	if err != nil {
+		return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
 	}
-
-	// If using env var credentials, try to find account in database
-	if os.Getenv("OP_SECRET_KEY") != "" && os.Getenv("OP_MASTER_PASSWORD") != "" {
-		db, err := openDB()
-		if err != nil {
-			return "", err
-		}
-		defer db.Close()
-
-		accounts, err := getAccounts(db)
-		if err != nil {
-			return "", err
-		}
-		if len(accounts) > 0 {
-			return accounts[0].AccountUUID, nil
-		}
-	}
-
-	return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
+	return uuid, nil
 }
 
 // selectDBAccount finds an account in the database matching the given criteria.

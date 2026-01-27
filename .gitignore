@@ -2,3 +2,10 @@ opcli
 .env
 *.o
 *.a
+
+# Test artifacts
+opcli-test
+
+# Local files
+.claude/
+testcases-inject.md

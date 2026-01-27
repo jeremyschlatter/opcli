@@ -19,11 +19,18 @@ type testEnv struct {
 	binPath    string
 	testDB     *TestDatabase
 	tmpDir     string
+	dataDir    string
 	sessionKey string
 }
 
 func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
+
+	// Find the test binary first
+	binPath := "./opcli-test"
+	if _, err := os.Stat(binPath); os.IsNotExist(err) {
+		t.Skip("opcli-test binary not found. Run 'make opcli-test && make sign-test' first.")
+	}
 
 	// Create temp directory for test files
 	tmpDir, err := os.MkdirTemp("", "opcli-e2e-*")
@@ -38,38 +45,66 @@ func setupTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("failed to create test database: %v", err)
 	}
 
-	// Find the test binary - it should be built as opcli-test
-	binPath := "./opcli-test"
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		// Try building it
-		testDB.Cleanup()
-		os.RemoveAll(tmpDir)
-		t.Skip("opcli-test binary not found. Run 'make opcli-test' first.")
-	}
+	// Create isolated data directory for sessions
+	dataDir := filepath.Join(tmpDir, "data")
 
-	return &testEnv{
+	env := &testEnv{
 		binPath:    binPath,
 		testDB:     testDB,
 		tmpDir:     tmpDir,
-		sessionKey: "test-session-key-1234",
+		dataDir:    dataDir,
+		sessionKey: "e2e-test-session",
 	}
+
+	// Store credentials in keychain using the signed binary
+	cmd := exec.Command(binPath, "test-store-creds")
+	cmd.Env = append(os.Environ(),
+		"OPCLI_TEST_DB="+testDB.Path,
+		"OPCLI_TEST_DATA_DIR="+dataDir,
+		"OPCLI_TEST_ACCOUNT_UUID="+testDB.AccountUUID,
+		"OPCLI_TEST_SECRET_KEY="+testDB.SecretKey,
+		"OPCLI_TEST_PASSWORD="+testDB.Password,
+		"OPCLI_TEST_EMAIL="+testDB.Email,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		testDB.Cleanup()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("failed to store test credentials: %v\nstderr: %s", err, stderr.String())
+	}
+
+	return env
 }
 
 func (e *testEnv) cleanup(t *testing.T) {
 	t.Helper()
+
+	// Delete credentials from keychain
+	cmd := exec.Command(e.binPath, "test-delete-creds")
+	cmd.Env = append(os.Environ(),
+		"OPCLI_TEST_DATA_DIR="+e.dataDir,
+		"OPCLI_TEST_ACCOUNT_UUID="+e.testDB.AccountUUID,
+	)
+	cmd.Run() // ignore errors
+
 	e.testDB.Cleanup()
 	os.RemoveAll(e.tmpDir)
+}
+
+// baseEnv returns the base environment for CLI commands
+func (e *testEnv) baseEnv() []string {
+	return append(os.Environ(),
+		"OPCLI_TEST_DB="+e.testDB.Path,
+		"OPCLI_TEST_DATA_DIR="+e.dataDir,
+		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
+	)
 }
 
 // runCLI runs the CLI with the given args and returns stdout, stderr, and exit code
 func (e *testEnv) runCLI(args ...string) (stdout, stderr string, exitCode int) {
 	cmd := exec.Command(e.binPath, args...)
-	cmd.Env = append(os.Environ(),
-		"OPCLI_TEST_DB="+e.testDB.Path,
-		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
-		"OP_SECRET_KEY="+e.testDB.SecretKey,
-		"OP_MASTER_PASSWORD="+e.testDB.Password,
-	)
+	cmd.Env = e.baseEnv()
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -89,12 +124,7 @@ func (e *testEnv) runCLI(args ...string) (stdout, stderr string, exitCode int) {
 // runCLIWithStdin runs the CLI with stdin input
 func (e *testEnv) runCLIWithStdin(stdin string, args ...string) (stdout, stderr string, exitCode int) {
 	cmd := exec.Command(e.binPath, args...)
-	cmd.Env = append(os.Environ(),
-		"OPCLI_TEST_DB="+e.testDB.Path,
-		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
-		"OP_SECRET_KEY="+e.testDB.SecretKey,
-		"OP_MASTER_PASSWORD="+e.testDB.Password,
-	)
+	cmd.Env = e.baseEnv()
 	cmd.Stdin = strings.NewReader(stdin)
 
 	var outBuf, errBuf bytes.Buffer
@@ -115,11 +145,11 @@ func (e *testEnv) runCLIWithStdin(stdin string, args ...string) (stdout, stderr 
 type testCase struct {
 	name     string
 	args     []string
-	stdin    string   // for inject
-	golden   string   // golden file name (if using golden files)
-	wantOut  string   // expected stdout (if not using golden)
-	wantErr  string   // expected stderr substring
-	wantCode int      // exit code (default 0)
+	stdin    string // for inject
+	golden   string // golden file name (if using golden files)
+	wantOut  string // expected stdout (if not using golden)
+	wantErr  string // expected stderr substring
+	wantCode int    // exit code (default 0)
 }
 
 func TestE2E_Version(t *testing.T) {
@@ -398,8 +428,9 @@ func TestE2E_Golden(t *testing.T) {
 }
 
 func TestE2E_TouchIDFail(t *testing.T) {
-	// This test requires credentials stored in the keychain, which requires
-	// a signed binary. Since e2e tests use env vars for credentials, this
-	// test is skipped.
-	t.Skip("TouchID failure test requires signed binary with stored keychain credentials")
+	// This test requires a fresh session (no cached auth) and TouchID to fail.
+	// Since our test setup creates a session via keychain storage, we'd need
+	// to delete the session first and then test with OPCLI_TEST_TOUCHID_FAIL=1.
+	// For now, skip this test.
+	t.Skip("TouchID failure test not yet implemented")
 }
