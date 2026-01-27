@@ -35,35 +35,76 @@ read:
     code: 1
 
 inject:
-  - name: braced reference
-    args: [inject]
-    stdin: "password={{ op://Private/Test Login/password }}"
-    out: password=secret123
-
+  # Braced references
   - name: braced reference with spaces
     args: [inject]
     stdin: "password={{ op://Private/Test Login/password }}"
     out: password=secret123
 
+  - name: braced reference no spaces
+    args: [inject]
+    stdin: "password={{op://Private/Test Login/password}}"
+    out: password=secret123
+
+  # Bare references
   - name: bare reference
     args: [inject]
     stdin: "password=op://Private/Test Login/password"
     out: password=secret123
 
+  - name: bare reference quote terminates
+    args: [inject]
+    stdin: '"op://Private/Test Login/password"'
+    out: '"secret123"'
+
+  - name: bare reference comma terminates
+    args: [inject]
+    stdin: "op://Private/Test Login/password,other"
+    out: "secret123,other"
+
+  - name: bare reference backslash terminates
+    args: [inject]
+    stdin: "op://Private/Test Login/password\\nother"
+    out: "secret123\\nother"
+
+  - name: bare reference newline terminates
+    args: [inject]
+    stdin: "op://Private/Test Login/password\nother"
+    out: "secret123\nother"
+
+  # Passthrough
   - name: no secrets passthrough
     args: [inject]
     stdin: No secrets here, just text
     out: No secrets here, just text
 
+  # Multiple references
   - name: multiple references
     args: [inject]
     stdin: "user={{ op://Private/Test Login/username }} pass={{ op://Private/Test Login/password }}"
     out: user=testuser pass=secret123
 
+  - name: same reference twice
+    args: [inject]
+    stdin: "a={{ op://Private/Test Login/password }} b={{ op://Private/Test Login/password }}"
+    out: a=secret123 b=secret123
+
+  - name: mixed braced and bare
+    args: [inject]
+    stdin: "a={{ op://Private/Test Login/username }} b=op://Private/Test Login/password"
+    out: a=testuser b=secret123
+
+  # Error cases
   - name: nonexistent item
     args: [inject]
     stdin: "{{ op://Private/nonexistent/field }}"
     err: "Error: failed to read op://Private/nonexistent/field: item not found: nonexistent\n"
+    code: 1
+
+  - name: nonexistent vault
+    args: [inject]
+    stdin: "{{ op://NoSuchVault/item/field }}"
+    err: "Error: failed to read op://NoSuchVault/item/field: vault not found: NoSuchVault\n"
     code: 1
 
   - name: inject file
