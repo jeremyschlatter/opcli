@@ -7,9 +7,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"math/big"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/term"
@@ -109,6 +113,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "inject":
+		if err := cmdInject(args[2:], accountFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("opcli %s\n", Version)
 	default:
@@ -127,6 +136,7 @@ func printUsage() {
 	fmt.Println("  opcli read <op://vault/item/section/field>")
 	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
+	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
 	fmt.Println("  opcli account list                   - List all accounts")
 	fmt.Println("  opcli account forget [<acct>]        - Remove an account")
 	fmt.Println()
@@ -1196,6 +1206,217 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 
 	return nil
+}
+
+func cmdInject(args []string, accountFlag string) error {
+	var inFile, outFile string
+	var fileMode fs.FileMode = 0600
+	var force bool
+
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-i", "--in-file":
+			if i+1 >= len(args) {
+				return fmt.Errorf("missing argument for %s", args[i])
+			}
+			i++
+			inFile = args[i]
+		case "-o", "--out-file":
+			if i+1 >= len(args) {
+				return fmt.Errorf("missing argument for %s", args[i])
+			}
+			i++
+			outFile = args[i]
+		case "--file-mode":
+			if i+1 >= len(args) {
+				return fmt.Errorf("missing argument for %s", args[i])
+			}
+			i++
+			mode, err := strconv.ParseUint(args[i], 8, 32)
+			if err != nil {
+				return fmt.Errorf("invalid file mode: %s", args[i])
+			}
+			fileMode = fs.FileMode(mode)
+		case "-f", "--force":
+			force = true
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unknown flag: %s", args[i])
+			}
+		}
+	}
+	_ = force // unused for now, but matching op CLI interface
+
+	// Read input
+	var input []byte
+	if inFile != "" {
+		var err error
+		input, err = os.ReadFile(inFile)
+		if err != nil {
+			return fmt.Errorf("failed to read input file: %w", err)
+		}
+	} else {
+		var err error
+		input, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("failed to read stdin: %w", err)
+		}
+	}
+
+	// Find op:// references - either {{ op://... }} or bare op://...
+	// Allowed chars in references: a-zA-Z0-9, -, _, ., space, and / (path separator)
+	// References end at any unsupported character (quotes, newlines, brackets, etc.)
+	// The final character must be non-space to avoid capturing trailing spaces
+	pattern := regexp.MustCompile(`\{\{\s*(op://[^}]*[^\s}])\s*\}\}|(op://[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-])`)
+	matches := pattern.FindAllStringSubmatch(string(input), -1)
+
+	if len(matches) == 0 {
+		// No secrets to inject, just pass through
+		if outFile != "" {
+			return os.WriteFile(outFile, input, fileMode)
+		}
+		_, err := os.Stdout.Write(input)
+		return err
+	}
+
+	// Collect unique URIs
+	uris := make(map[string]bool)
+	for _, m := range matches {
+		uri := m[1] // braced: {{ op://... }}
+		if uri == "" {
+			uri = m[0] // bare: op://...
+		}
+		uris[uri] = true
+	}
+
+	// Open vault keychain once for all lookups
+	vk, err := openVaultKeychain(accountFlag)
+	if err != nil {
+		return err
+	}
+	defer vk.Close()
+
+	// Resolve all secrets
+	secrets := make(map[string]string)
+	for uri := range uris {
+		value, err := readSecret(vk, uri)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", uri, err)
+		}
+		secrets[uri] = value
+	}
+
+	// Replace all patterns with their values
+	output := pattern.ReplaceAllStringFunc(string(input), func(match string) string {
+		m := pattern.FindStringSubmatch(match)
+		uri := m[1] // braced
+		if uri == "" {
+			uri = m[0] // bare
+		}
+		return secrets[uri]
+	})
+
+	// Write output
+	if outFile != "" {
+		return os.WriteFile(outFile, []byte(output), fileMode)
+	}
+	_, err = os.Stdout.WriteString(output)
+	return err
+}
+
+// readSecret reads a secret value from a URI using an already-opened vault keychain.
+func readSecret(vk *VaultKeychain, uri string) (string, error) {
+	vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the vault
+	vaults, err := getVaults(vk.db.DB, vk.accountID)
+	if err != nil {
+		return "", err
+	}
+
+	var targetVaultUUID string
+	for _, v := range vaults {
+		var encAttrs EncryptedData
+		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
+			continue
+		}
+
+		key, err := vk.getVaultKey(v.VaultUUID)
+		if err != nil {
+			continue
+		}
+
+		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
+		if err != nil {
+			continue
+		}
+
+		var attrs struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
+			continue
+		}
+
+		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
+		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
+			targetVaultUUID = v.VaultUUID
+			break
+		}
+	}
+
+	if targetVaultUUID == "" {
+		return "", fmt.Errorf("vault not found: %s", vaultName)
+	}
+
+	// Get vault ID
+	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
+	if err != nil {
+		return "", err
+	}
+
+	// Get all items in the vault
+	items, err := getItemOverviews(vk.db.DB, vaultID)
+	if err != nil {
+		return "", err
+	}
+
+	// Find matching item
+	var targetItem *ItemOverview
+	for i := range items {
+		overview, err := vk.decryptOverview(targetVaultUUID, &items[i].EncOverview)
+		if err != nil {
+			continue
+		}
+
+		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
+			targetItem = &items[i]
+			break
+		}
+	}
+
+	if targetItem == nil {
+		return "", fmt.Errorf("item not found: %s", itemName)
+	}
+
+	// Get item details
+	detail, err := getItemDetail(vk.db.DB, targetItem.ID)
+	if err != nil {
+		return "", err
+	}
+
+	// Decrypt details
+	decryptedItem, err := vk.decryptDetail(targetVaultUUID, &detail.EncDetails)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the field
+	return findField(decryptedItem, sectionName, fieldName)
 }
 
 // parseRSAPrivateKey parses a JWK JSON into an RSA private key
