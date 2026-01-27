@@ -189,8 +189,8 @@ func TestE2E(t *testing.T) {
 						t.Errorf("stdout:\ngot:  %q\nwant: %q", stdout, tc.Out)
 					}
 
-					if tc.Err != "" && !strings.Contains(stderr, tc.Err) {
-						t.Errorf("stderr should contain %q, got: %q", tc.Err, stderr)
+					if tc.Err != "" && stderr != tc.Err {
+						t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
 					}
 
 					// Check output files

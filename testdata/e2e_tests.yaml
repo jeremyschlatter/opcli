@@ -21,17 +21,17 @@ read:
 
   - name: vault not found
     args: [read, "op://NoSuchVault/item/field"]
-    err: vault not found
+    err: "Error: vault not found: NoSuchVault\n"
     code: 1
 
   - name: item not found
     args: [read, "op://Private/NoSuchItem/field"]
-    err: item not found
+    err: "Error: item not found: NoSuchItem\n"
     code: 1
 
   - name: field not found
     args: [read, "op://Private/Test Login/nosuchfield"]
-    err: field not found
+    err: "Error: field not found: nosuchfield\n"
     code: 1
 
 inject:
@@ -63,7 +63,7 @@ inject:
   - name: nonexistent item
     args: [inject]
     stdin: "{{ op://Private/nonexistent/field }}"
-    err: item not found
+    err: "Error: failed to read op://Private/nonexistent/field: item not found: nonexistent\n"
     code: 1
 
   - name: inject file
