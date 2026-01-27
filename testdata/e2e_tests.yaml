@@ -1,0 +1,93 @@
+read:
+  - name: read password field
+    args: [read, "op://Private/Test Login/password"]
+    out: "secret123\n"
+
+  - name: read username field
+    args: [read, "op://Private/Test Login/username"]
+    out: "testuser\n"
+
+  - name: read credential field
+    args: [read, "op://Private/Test API Key/credential"]
+    out: "api-key-12345\n"
+
+  - name: read sectioned field with section path
+    args: [read, "op://Private/Test Sectioned/server/hostname"]
+    out: "example.com\n"
+
+  - name: read sectioned field without section (unambiguous)
+    args: [read, "op://Private/Test Sectioned/hostname"]
+    out: "example.com\n"
+
+  - name: vault not found
+    args: [read, "op://NoSuchVault/item/field"]
+    err: vault not found
+    code: 1
+
+  - name: item not found
+    args: [read, "op://Private/NoSuchItem/field"]
+    err: item not found
+    code: 1
+
+  - name: field not found
+    args: [read, "op://Private/Test Login/nosuchfield"]
+    err: field not found
+    code: 1
+
+inject:
+  - name: braced reference
+    args: [inject]
+    stdin: "password={{ op://Private/Test Login/password }}"
+    out: password=secret123
+
+  - name: braced reference with spaces
+    args: [inject]
+    stdin: "password={{ op://Private/Test Login/password }}"
+    out: password=secret123
+
+  - name: bare reference
+    args: [inject]
+    stdin: "password=op://Private/Test Login/password"
+    out: password=secret123
+
+  - name: no secrets passthrough
+    args: [inject]
+    stdin: No secrets here, just text
+    out: No secrets here, just text
+
+  - name: multiple references
+    args: [inject]
+    stdin: "user={{ op://Private/Test Login/username }} pass={{ op://Private/Test Login/password }}"
+    out: user=testuser pass=secret123
+
+  - name: nonexistent item
+    args: [inject]
+    stdin: "{{ op://Private/nonexistent/field }}"
+    err: item not found
+    code: 1
+
+  - name: inject file
+    args: [inject, -i, input.txt, -o, output.txt]
+    files:
+      input.txt: "password={{ op://Private/Test Login/password }}"
+    outputs:
+      output.txt:
+        content: password=secret123
+        mode: 0600
+
+  - name: inject file with custom mode
+    args: [inject, -i, input.txt, -o, output.txt, --file-mode, "0644"]
+    files:
+      input.txt: test
+    outputs:
+      output.txt:
+        content: test
+        mode: 0644
+
+list:
+  - name: list vaults
+    args: [list]
+    out: |
+      Vaults:
+        Private (vault-Private-uuid)
+        Work (vault-Work-uuid)

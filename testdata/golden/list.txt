@@ -1,3 +1,0 @@
-Vaults:
-  Private (vault-Private-uuid)
-  Work (vault-Work-uuid)
