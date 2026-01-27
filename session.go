@@ -55,6 +55,10 @@ func getSessionPath() (string, error) {
 // getSessionKey returns a unique key for the current terminal session.
 // Based on TTY device + TTY start time, ensuring uniqueness even after TTY reuse.
 func getSessionKey() (string, error) {
+	if k := os.Getenv("OPCLI_TEST_SESSION_KEY"); k != "" {
+		return k, nil
+	}
+
 	// Get the actual TTY device path (e.g., /dev/ttys001)
 	cTTY := C.getTTYName()
 	if cTTY == nil {

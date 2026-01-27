@@ -12,6 +12,10 @@ import (
 
 // getDBPath returns the path to the 1Password SQLite database
 func getDBPath() (string, error) {
+	if p := os.Getenv("OPCLI_TEST_DB"); p != "" {
+		return p, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)

@@ -1,8 +1,6 @@
 package main
 
 /*
-#cgo LDFLAGS: -framework Security -framework CoreFoundation -framework LocalAuthentication -framework Foundation -L${SRCDIR} -ltouchid
-
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #include <mach-o/dyld.h>
@@ -169,14 +167,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"unsafe"
 )
 
-const (
-	keychainService     = "opcli"
-	keychainCredentials = "credentials"
-)
+var keychainService = "opcli"
+
+const keychainCredentials = "credentials"
 
 // CredentialStore holds all account credentials in a single keychain entry.
 type CredentialStore struct {
@@ -253,6 +251,11 @@ func keychainDelete(account string) error {
 
 // loadCredentialStore loads the credential store from keychain.
 func loadCredentialStore() (*CredentialStore, error) {
+	// Skip keychain access if using env var credentials
+	if os.Getenv("OP_SECRET_KEY") != "" && os.Getenv("OP_MASTER_PASSWORD") != "" {
+		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
+	}
+
 	data, err := keychainGet(keychainCredentials)
 	if err != nil {
 		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil

@@ -12,7 +12,7 @@ SIGN_IDENTITY ?=
 # Version can be set via command line or defaults to git describe
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
-.PHONY: all clean sign
+.PHONY: all clean sign test
 
 all: opcli
 
@@ -22,9 +22,23 @@ libtouchid.a: touchid.m
 	ar rcs libtouchid.a touchid.o
 	rm -f touchid.o
 
+# Compile TouchID stub for testing (always returns success)
+libtouchid_stub.a: touchid_stub.m
+	clang -c -o touchid_stub.o touchid_stub.m -fobjc-arc
+	ar rcs libtouchid_stub.a touchid_stub.o
+	rm -f touchid_stub.o
+
 # Build Go binary (requires libtouchid.a)
 opcli: libtouchid.a *.go go.mod go.sum
 	go build -ldflags "-X main.Version=$(VERSION)" -o opcli .
+
+# Build test binary with stubbed TouchID
+opcli-test: libtouchid_stub.a *.go go.mod go.sum
+	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
+
+# Run e2e tests
+test: opcli-test
+	go test -tags test -v ./...
 
 # Sign the binary (required for Touch ID and Keychain ACL)
 sign: opcli
@@ -34,4 +48,4 @@ endif
 	codesign --sign "$(SIGN_IDENTITY)" --options runtime --force opcli
 
 clean:
-	rm -f opcli libtouchid.a touchid.o
+	rm -f opcli opcli-test libtouchid.a libtouchid_stub.a touchid.o touchid_stub.o

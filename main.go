@@ -170,12 +170,30 @@ func resolveAccountUUID(accountFlag string) (string, error) {
 		return uuid, nil
 	}
 
-	// Use default account
+	// Use default account from keychain
 	uuid, err := GetDefaultAccount()
-	if err != nil {
-		return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
+	if err == nil {
+		return uuid, nil
 	}
-	return uuid, nil
+
+	// If using env var credentials, try to find account in database
+	if os.Getenv("OP_SECRET_KEY") != "" && os.Getenv("OP_MASTER_PASSWORD") != "" {
+		db, err := openDB()
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+
+		accounts, err := getAccounts(db)
+		if err != nil {
+			return "", err
+		}
+		if len(accounts) > 0 {
+			return accounts[0].AccountUUID, nil
+		}
+	}
+
+	return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
 }
 
 // selectDBAccount finds an account in the database matching the given criteria.
@@ -765,17 +783,11 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 		return nil, err
 	}
 
-	// Get stored account info
-	store, err := GetStoredAccounts()
-	if err != nil {
-		return nil, err
-	}
-	storedAcct, ok := store.Accounts[accountUUID]
-	if !ok {
-		return nil, fmt.Errorf("account not found in stored credentials")
-	}
+	// Get stored account info (may not exist if using env var credentials)
+	store, _ := GetStoredAccounts()
+	storedAcct := store.Accounts[accountUUID]
 
-	// Get credentials (with session/biometric)
+	// Get credentials (with session/biometric or env vars)
 	password, secretKey, err := getCredentials(accountUUID)
 	if err != nil {
 		return nil, err
@@ -794,10 +806,12 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 
 	var accountID int64
 	var accountType string
+	var email string
 	for _, a := range accounts {
 		if a.AccountUUID == accountUUID {
 			accountID = a.ID
 			accountType = a.AccountType
+			email = a.Email
 			break
 		}
 	}
@@ -805,8 +819,13 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
 	}
 
+	// Get email from stored account or from database
+	if storedAcct != nil {
+		email = storedAcct.Email
+	}
+
 	// Initialize keychain
-	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType)
+	return newVaultKeychain(password, secretKey, email, accountUUID, accountID, accountType)
 }
 
 func cmdRead(uri string, accountFlag string) error {

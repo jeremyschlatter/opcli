@@ -1,3 +1,5 @@
+//go:build !test
+
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <dispatch/dispatch.h>
 
