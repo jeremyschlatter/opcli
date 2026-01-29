@@ -88,7 +88,6 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 ## Limitations
 
 - macOS only (hardcoded database path)
-- Some shared vaults from other accounts may not decrypt (missing keysets)
 - Read-only (no write operations)
 
 ## Why Not Desktop App Integration?
