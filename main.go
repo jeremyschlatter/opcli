@@ -1490,19 +1490,15 @@ func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
 }
 
 func (m *maskingWriter) Write(p []byte) (n int, err error) {
+	// If no secrets to mask, write everything
+	if m.maxSecretLen == 0 {
+		return m.w.Write(p)
+	}
+
 	m.buf = append(m.buf, p...)
 
 	// Replace all complete secrets in the buffer
 	m.buf = []byte(m.replacer.Replace(string(m.buf)))
-
-	// If no secrets to mask, write everything
-	if m.maxSecretLen == 0 {
-		if _, err := m.w.Write(m.buf); err != nil {
-			return len(p), err
-		}
-		m.buf = m.buf[:0]
-		return len(p), nil
-	}
 
 	// Keep the last maxSecretLen-1 bytes (could be start of a secret)
 	// Everything before that is safe to write
