@@ -37,7 +37,7 @@ opcli-test: libtouchid_stub.a *.go go.mod go.sum
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
 
 # Run e2e tests
-test: sign-test
+test:
 	go test -tags test ./...
 
 # Sign the binary (required for Touch ID and Keychain ACL)
