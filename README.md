@@ -87,7 +87,7 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 ## Limitations
 
-- macOS only (hardcoded database path)
+- macOS only
 - Read-only (no write operations)
 
 ## Why Not Desktop App Integration?
