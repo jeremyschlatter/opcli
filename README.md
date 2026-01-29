@@ -58,9 +58,19 @@ opcli get "op://VaultName/ItemName"
 opcli signout
 ```
 
-### Touch ID & Sessions
+## Security
 
-After running `opcli signin`, your credentials are stored in the macOS Keychain with an app-only ACL (only the signed `opcli` binary can read them).
+### Touch ID
+
+We unfortunately cannot integrate with the 1Password Desktop App for account unlocking, so `opcli signin` will require you to enter both your 1Password Secret Key (from your Emergency Kit) and your Master Password.
+
+These credentials are stored in the macOS Keychain with an app-only ACL. After this, `opcli` will only use TouchID to authenticate you. If any other app tries to read these credentials from the Keychain, macOS will give you a Keychain password prompt:
+
+> `app` wants to use your confidential information stored in "opcli credentials" in your keychain.
+
+...which you should deny.
+
+### Sessions
 
 Each terminal session requires Touch ID authentication on first access. After authenticating:
 - The session lasts for **10 minutes of inactivity**
@@ -85,7 +95,7 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 The official `op` CLI can avoid password prompts by integrating with the 1Password desktop app (Touch ID).
 
-Unfortunately for us, but fortunately for 1Password security in general, the desktop app requires a code signature from Agile Bits before accepting a connection from the CLI.
+Unfortunately for us, but fortunately for 1Password security in general, the desktop app requires a code signature from Agile Bits before accepting a connection from the CLI. If `opcli` does extremely well, maybe we can get Agile Bits to adopt it some day. Until then, we're stuck with managing the master password ourselves.
 
 ## License
 
