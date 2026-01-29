@@ -38,7 +38,6 @@ The build requires Xcode Command Line Tools and Go 1.21+.
 ### Code Signing (required for Touch ID)
 
 For Touch ID support, the binary must be signed with a Developer ID certificate.
-Without code signing, you can still use environment variables or the daemon for authentication.
 
 ## Usage
 
