@@ -156,15 +156,16 @@ func (e *testEnv) runCLI(workDir, stdin string, extraEnv map[string]string, args
 }
 
 type yamlTestCase struct {
-	Name   string            `yaml:"name"`
-	Args   []string          `yaml:"args"`
-	Stdin  string            `yaml:"stdin"`
-	Out    string            `yaml:"out"`
-	Err    string            `yaml:"err"`
-	Code   int               `yaml:"code"`
-	Files  map[string]string `yaml:"files"`
-	Env    map[string]string `yaml:"env"`
-	Outputs map[string]struct {
+	Name      string            `yaml:"name"`
+	Args      []string          `yaml:"args"`
+	Stdin     string            `yaml:"stdin"`
+	Out       string            `yaml:"out"`
+	Err       string            `yaml:"err"`
+	ErrPrefix string            `yaml:"errPrefix"`
+	Code      int               `yaml:"code"`
+	Files     map[string]string `yaml:"files"`
+	Env       map[string]string `yaml:"env"`
+	Outputs   map[string]struct {
 		Content string      `yaml:"content"`
 		Mode    os.FileMode `yaml:"mode"`
 	} `yaml:"outputs"`
@@ -218,17 +219,12 @@ func TestE2E(t *testing.T) {
 						t.Errorf("stdout:\ngot:  %q\nwant: %q", stdout, tc.Out)
 					}
 
-					// For stderr, support prefix matching when expected doesn't end with \n
-					if tc.Err != "" {
-						if strings.HasSuffix(tc.Err, "\n") {
-							if stderr != tc.Err {
-								t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
-							}
-						} else {
-							if !strings.HasPrefix(stderr, tc.Err) {
-								t.Errorf("stderr:\ngot:  %q\nwant prefix: %q", stderr, tc.Err)
-							}
-						}
+					if tc.Err != "" && stderr != tc.Err {
+						t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
+					}
+
+					if tc.ErrPrefix != "" && !strings.HasPrefix(stderr, tc.ErrPrefix) {
+						t.Errorf("stderr:\ngot:  %q\nwant prefix: %q", stderr, tc.ErrPrefix)
 					}
 
 					// Check output files

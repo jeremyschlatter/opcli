@@ -423,13 +423,13 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 // VaultKeychain holds decrypted keys for accessing vault items
 type VaultKeychain struct {
 	db              *DB
-	accountID       int64                        // internal DB account ID
-	accountType     string                       // I=Individual, F=Family, T=Teams, B=Business
-	primaryKeysetID string                       // UUID of the primary keyset
-	primarySymKey   []byte                       // Decrypted primary symmetric key
-	keysetRSAKeys   map[string]*rsa.PrivateKey   // keyset UUID -> RSA private key
-	keysetSymKeys   map[string][]byte            // keyset UUID -> symmetric key
-	vaultKeys       map[string][]byte            // vault UUID -> symmetric key
+	accountID       int64                      // internal DB account ID
+	accountType     string                     // I=Individual, F=Family, T=Teams, B=Business
+	primaryKeysetID string                     // UUID of the primary keyset
+	primarySymKey   []byte                     // Decrypted primary symmetric key
+	keysetRSAKeys   map[string]*rsa.PrivateKey // keyset UUID -> RSA private key
+	keysetSymKeys   map[string][]byte          // keyset UUID -> symmetric key
+	vaultKeys       map[string][]byte          // vault UUID -> symmetric key
 }
 
 type DB struct {
@@ -1384,6 +1384,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = finalEnv
 
+	var stdoutMask, stderrMask *maskingWriter
 	if noMasking || len(secrets) == 0 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -1393,17 +1394,29 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		for _, v := range secrets {
 			secretValues = append(secretValues, v)
 		}
-		cmd.Stdout = &maskingWriter{w: os.Stdout, secrets: secretValues}
-		cmd.Stderr = &maskingWriter{w: os.Stderr, secrets: secretValues}
+		stdoutMask = newMaskingWriter(os.Stdout, secretValues)
+		stderrMask = newMaskingWriter(os.Stderr, secretValues)
+		cmd.Stdout = stdoutMask
+		cmd.Stderr = stderrMask
 	}
 
 	cmd.Stdin = os.Stdin
 
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	runErr := cmd.Run()
+
+	// Flush masking writers
+	if stdoutMask != nil {
+		stdoutMask.Close()
+	}
+	if stderrMask != nil {
+		stderrMask.Close()
+	}
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			return exitErr.ExitCode(), nil
 		}
-		return 0, err
+		return 0, runErr
 	}
 	return 0, nil
 }
@@ -1448,21 +1461,71 @@ func parseEnvFile(path string, env map[string]string) (map[string]string, error)
 	return result, nil
 }
 
-// maskingWriter replaces secret values with <concealed> in output
+// maskingWriter replaces secret values with <concealed> in output.
+// It buffers data to handle secrets that might be split across Write calls.
 type maskingWriter struct {
-	w       io.Writer
-	secrets []string
+	w            io.Writer
+	replacer     *strings.Replacer
+	maxSecretLen int
+	buf          []byte
+}
+
+func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
+	// Build replacer pairs: secret1, <concealed>, secret2, <concealed>, ...
+	var pairs []string
+	maxLen := 0
+	for _, s := range secrets {
+		if s != "" {
+			pairs = append(pairs, s, "<concealed>")
+			if len(s) > maxLen {
+				maxLen = len(s)
+			}
+		}
+	}
+	return &maskingWriter{
+		w:            w,
+		replacer:     strings.NewReplacer(pairs...),
+		maxSecretLen: maxLen,
+	}
 }
 
 func (m *maskingWriter) Write(p []byte) (n int, err error) {
-	s := string(p)
-	for _, secret := range m.secrets {
-		if secret != "" {
-			s = strings.ReplaceAll(s, secret, "<concealed>")
+	m.buf = append(m.buf, p...)
+
+	// Replace all complete secrets in the buffer
+	m.buf = []byte(m.replacer.Replace(string(m.buf)))
+
+	// If no secrets to mask, write everything
+	if m.maxSecretLen == 0 {
+		if _, err := m.w.Write(m.buf); err != nil {
+			return len(p), err
 		}
+		m.buf = m.buf[:0]
+		return len(p), nil
 	}
-	_, err = m.w.Write([]byte(s))
-	return len(p), err
+
+	// Keep the last maxSecretLen-1 bytes (could be start of a secret)
+	// Everything before that is safe to write
+	safeLen := len(m.buf) - m.maxSecretLen + 1
+	if safeLen <= 0 {
+		return len(p), nil
+	}
+
+	if _, err := m.w.Write(m.buf[:safeLen]); err != nil {
+		return len(p), err
+	}
+
+	m.buf = m.buf[safeLen:]
+	return len(p), nil
+}
+
+func (m *maskingWriter) Close() error {
+	if len(m.buf) == 0 {
+		return nil
+	}
+	_, err := m.w.Write([]byte(m.replacer.Replace(string(m.buf))))
+	m.buf = nil
+	return err
 }
 
 func printRunUsage() {

@@ -394,6 +394,14 @@ func addTestItems(db *sql.DB, vault *TestVault) error {
 		return err
 	}
 
+	// Test item with empty field value
+	emptyFields := []Field{
+		{Name: "empty", Type: "string", Value: ""},
+	}
+	if err := addTestItem(db, vault, "Test Empty", emptyFields); err != nil {
+		return err
+	}
+
 	return nil
 }
 

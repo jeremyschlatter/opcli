@@ -232,6 +232,18 @@ run:
       SECRET: "op://Private/Test Login/password"
     out: "<concealed>\n"
 
+  - name: mask secret split across writes
+    args: [run, --, sh, -c, "echo -n secre; sleep 0.01; echo t123"]
+    env:
+      SECRET: "op://Private/Test Login/password"
+    out: "<concealed>\n"
+
+  - name: empty secret value does not panic
+    args: [run, --, echo, hello]
+    env:
+      EMPTY: "op://Private/Test Empty/empty"
+    out: "hello\n"
+
   - name: no-masking shows secrets
     args: [run, --no-masking, --, sh, -c, "echo secret123"]
     env:
@@ -275,7 +287,7 @@ run:
 
   - name: env file not found
     args: [run, --env-file, nonexistent.env, --, echo, hi]
-    err: "Error: failed to read env file nonexistent.env: "
+    errPrefix: "Error: failed to read env file nonexistent.env: "
     code: 1
 
   - name: command exit code propagates
@@ -284,5 +296,5 @@ run:
 
   - name: no command provided
     args: [run]
-    err: "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>..."
+    errPrefix: "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>..."
     code: 1
