@@ -97,13 +97,9 @@ func cmdDaemon() error {
 	defer os.Remove(tokenPath)
 
 	// Get secret key
-	secretKey := os.Getenv("OP_SECRET_KEY")
-	if secretKey == "" {
-		fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-		var sk string
-		fmt.Scanln(&sk)
-		secretKey = sk
-	}
+	fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
+	var secretKey string
+	fmt.Scanln(&secretKey)
 
 	// Get master password
 	fmt.Fprint(os.Stderr, "Enter Master Password: ")

@@ -70,13 +70,6 @@ Each terminal session requires Touch ID authentication on first access. After au
 
 This mirrors the UX of the official `op` CLI's desktop app integration.
 
-### Legacy: Environment Variables
-
-You can also set these environment variables (less secure):
-
-- `OP_SECRET_KEY` - Your 1Password Secret Key (A3-XXXXX-...)
-- `OP_MASTER_PASSWORD` - Your master password
-
 ### Legacy: Credential Daemon
 
 The `opcli daemon` command is still available for cases where Touch ID isn't suitable, but `opcli signin` is recommended.

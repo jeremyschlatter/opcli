@@ -404,13 +404,6 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 		return pw, sk, nil
 	}
 
-	// Check for environment variables
-	envSecretKey := os.Getenv("OP_SECRET_KEY")
-	envPassword := os.Getenv("OP_MASTER_PASSWORD")
-	if envSecretKey != "" && envPassword != "" {
-		return envPassword, envSecretKey, nil
-	}
-
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
@@ -448,28 +441,21 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 
 // getCredentialsManual prompts for credentials without using keychain/sessions.
 func getCredentialsManual() (password, secretKey string, err error) {
-	secretKey = os.Getenv("OP_SECRET_KEY")
-	password = os.Getenv("OP_MASTER_PASSWORD")
-
-	if secretKey == "" {
-		fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-		skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read secret key: %w", err)
-		}
-		fmt.Fprintln(os.Stderr)
-		secretKey = strings.TrimSpace(string(skBytes))
+	fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
+	skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read secret key: %w", err)
 	}
+	fmt.Fprintln(os.Stderr)
+	secretKey = strings.TrimSpace(string(skBytes))
 
-	if password == "" {
-		fmt.Fprint(os.Stderr, "Enter Master Password: ")
-		pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read password: %w", err)
-		}
-		fmt.Fprintln(os.Stderr)
-		password = string(pwBytes)
+	fmt.Fprint(os.Stderr, "Enter Master Password: ")
+	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read password: %w", err)
 	}
+	fmt.Fprintln(os.Stderr)
+	password = string(pwBytes)
 
 	return password, secretKey, nil
 }
@@ -779,11 +765,17 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 		return nil, err
 	}
 
-	// Get stored account info (may not exist if using env var credentials)
-	store, _ := GetStoredAccounts()
-	storedAcct := store.Accounts[accountUUID]
+	// Get stored account info
+	store, err := GetStoredAccounts()
+	if err != nil {
+		return nil, err
+	}
+	storedAcct, ok := store.Accounts[accountUUID]
+	if !ok {
+		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
+	}
 
-	// Get credentials (with session/biometric or env vars)
+	// Get credentials (with session/biometric)
 	password, secretKey, err := getCredentials(accountUUID)
 	if err != nil {
 		return nil, err
@@ -802,12 +794,10 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 
 	var accountID int64
 	var accountType string
-	var email string
 	for _, a := range accounts {
 		if a.AccountUUID == accountUUID {
 			accountID = a.ID
 			accountType = a.AccountType
-			email = a.Email
 			break
 		}
 	}
@@ -815,13 +805,8 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
 	}
 
-	// Get email from stored account or from database
-	if storedAcct != nil {
-		email = storedAcct.Email
-	}
-
 	// Initialize keychain
-	return newVaultKeychain(password, secretKey, email, accountUUID, accountID, accountType)
+	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType)
 }
 
 func cmdRead(uri string, accountFlag string) error {
