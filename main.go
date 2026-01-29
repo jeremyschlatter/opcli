@@ -389,16 +389,13 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
-	if session == nil {
-		// No valid session - need to authenticate
-		// First check if we have credentials in keychain
-		sk, pw, err := GetCredentials(accountUUID)
-		if err != nil {
-			// No stored credentials - prompt manually
-			return getCredentialsManual()
-		}
+	sk, pw, err := GetCredentials(accountUUID)
+	if err != nil {
+		return "", "", fmt.Errorf("no account configured (run 'opcli signin' first)")
+	}
 
-		// Have stored credentials - require biometric auth
+	if session == nil {
+		// No valid session - require biometric auth
 		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
 			return "", "", fmt.Errorf("authentication failed: %w", err)
 		}
@@ -408,38 +405,9 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 			// Non-fatal, continue without session
 			fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
 		}
-
-		return pw, sk, nil
-	}
-
-	// Have valid session - get credentials without biometric
-	sk, pw, err := GetCredentials(accountUUID)
-	if err != nil {
-		return "", "", fmt.Errorf("credentials not found (run 'opcli signin' first): %w", err)
 	}
 
 	return pw, sk, nil
-}
-
-// getCredentialsManual prompts for credentials without using keychain/sessions.
-func getCredentialsManual() (password, secretKey string, err error) {
-	fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-	skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read secret key: %w", err)
-	}
-	fmt.Fprintln(os.Stderr)
-	secretKey = strings.TrimSpace(string(skBytes))
-
-	fmt.Fprint(os.Stderr, "Enter Master Password: ")
-	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read password: %w", err)
-	}
-	fmt.Fprintln(os.Stderr)
-	password = string(pwBytes)
-
-	return password, secretKey, nil
 }
 
 // VaultKeychain holds decrypted keys for accessing vault items
