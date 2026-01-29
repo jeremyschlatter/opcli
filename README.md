@@ -70,10 +70,6 @@ Each terminal session requires Touch ID authentication on first access. After au
 
 This mirrors the UX of the official `op` CLI's desktop app integration.
 
-### Legacy: Credential Daemon
-
-The `opcli daemon` command is still available for cases where Touch ID isn't suitable, but `opcli signin` is recommended.
-
 ## Requirements
 
 - macOS (reads from `~/Library/Group Containers/2BUA8C4S2C.com.1password/`)

@@ -10,10 +10,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// testDBPath can be set by test builds to override the database path.
+var testDBPath string
+
 // getDBPath returns the path to the 1Password SQLite database
 func getDBPath() (string, error) {
-	if p := os.Getenv("OPCLI_TEST_DB"); p != "" {
-		return p, nil
+	if testDBPath != "" {
+		return testDBPath, nil
 	}
 
 	home, err := os.UserHomeDir()

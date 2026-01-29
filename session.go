@@ -44,8 +44,28 @@ type SessionStore struct {
 	Sessions map[string]*Session `json:"sessions"`
 }
 
+// testDataDir can be set by test builds to override the data directory.
+var testDataDir string
+
+func getDataDir() (string, error) {
+	var dir string
+	if testDataDir != "" {
+		dir = testDataDir
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".opcli")
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 func getSessionPath() (string, error) {
-	dir, err := getDaemonDir() // reuse from daemon.go
+	dir, err := getDataDir()
 	if err != nil {
 		return "", err
 	}

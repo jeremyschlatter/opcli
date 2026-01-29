@@ -112,11 +112,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "daemon":
-		if err := cmdDaemon(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
 	case "signin":
 		if err := cmdSignin(accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -329,31 +324,23 @@ func cmdSignin(accountFlag string) error {
 	shorthand := ExtractShorthand(account.SignInURL)
 	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, shorthand)
 
-	var password, secretKey string
-
-	// Try daemon first for convenience during testing
-	if pw, sk, ok := getCredentialsFromDaemon(); ok {
-		password, secretKey = pw, sk
-		fmt.Fprintln(os.Stderr, "(using credentials from daemon)")
-	} else {
-		// Get secret key
-		fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-		skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("failed to read secret key: %w", err)
-		}
-		fmt.Fprintln(os.Stderr)
-		secretKey = strings.TrimSpace(string(skBytes))
-
-		// Get master password
-		fmt.Fprint(os.Stderr, "Enter Master Password: ")
-		pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("failed to read password: %w", err)
-		}
-		fmt.Fprintln(os.Stderr)
-		password = string(pwBytes)
+	// Get secret key
+	fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
+	skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to read secret key: %w", err)
 	}
+	fmt.Fprintln(os.Stderr)
+	secretKey := strings.TrimSpace(string(skBytes))
+
+	// Get master password
+	fmt.Fprint(os.Stderr, "Enter Master Password: ")
+	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+	fmt.Fprintln(os.Stderr)
+	password := string(pwBytes)
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
@@ -399,11 +386,6 @@ func cmdSignout(accountFlag string) error {
 
 // getCredentials gets credentials for an account, using session-based auth if available.
 func getCredentials(accountUUID string) (password, secretKey string, err error) {
-	// Try daemon first (legacy)
-	if pw, sk, ok := getCredentialsFromDaemon(); ok {
-		return pw, sk, nil
-	}
-
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
