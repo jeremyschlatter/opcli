@@ -4,14 +4,42 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+var (
+	buildOnce   sync.Once
+	buildErr    error
+	testBinPath string
+)
+
+func buildTestBinary() (string, error) {
+	buildOnce.Do(func() {
+		// Get absolute path for the binary
+		testBinPath, buildErr = filepath.Abs("./opcli-test")
+		if buildErr != nil {
+			return
+		}
+
+		// Build and sign via make
+		cmd := exec.Command("make", "sign-test")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			buildErr = fmt.Errorf("failed to build test binary: %v\nstderr: %s", err, stderr.String())
+			return
+		}
+	})
+	return testBinPath, buildErr
+}
 
 // testEnv holds environment setup for e2e tests
 type testEnv struct {
@@ -25,13 +53,10 @@ type testEnv struct {
 func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
-	// Find the test binary first (use absolute path so it works from any workDir)
-	binPath, err := filepath.Abs("./opcli-test")
+	// Build the test binary (cached across test runs)
+	binPath, err := buildTestBinary()
 	if err != nil {
-		t.Fatalf("failed to get absolute path: %v", err)
-	}
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("opcli-test binary not found. Run 'make opcli-test && make sign-test' first.")
+		t.Fatalf("failed to build test binary: %v", err)
 	}
 
 	// Create temp directory for test files
