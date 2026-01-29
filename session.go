@@ -135,6 +135,15 @@ func saveSessions(store *SessionStore) error {
 		return err
 	}
 
+	// Clean expired sessions before saving
+	now := time.Now()
+	for key, session := range store.Sessions {
+		if now.Sub(session.LastAccess) > sessionInactivityMax ||
+			now.Sub(session.Created) > sessionAbsoluteMax {
+			delete(store.Sessions, key)
+		}
+	}
+
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
@@ -243,29 +252,4 @@ func CreateSession(accountID string) (*Session, error) {
 	}
 
 	return session, nil
-}
-
-
-// CleanExpiredSessions removes all expired sessions from the store.
-func CleanExpiredSessions() error {
-	store, err := loadSessions()
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	changed := false
-
-	for key, session := range store.Sessions {
-		if now.Sub(session.LastAccess) > sessionInactivityMax ||
-			now.Sub(session.Created) > sessionAbsoluteMax {
-			delete(store.Sessions, key)
-			changed = true
-		}
-	}
-
-	if changed {
-		return saveSessions(store)
-	}
-	return nil
 }
