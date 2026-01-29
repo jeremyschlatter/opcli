@@ -132,3 +132,157 @@ list:
       Vaults:
         Private (vault-Private-uuid)
         Work (vault-Work-uuid)
+
+run:
+  # Basic functionality (use --no-masking to verify resolved values)
+  - name: resolve env var secret reference
+    args: [run, --no-masking, --, printenv, DB_PASSWORD]
+    env:
+      DB_PASSWORD: "op://Private/Test Login/password"
+    out: "secret123\n"
+
+  - name: resolve multiple env var secrets
+    args: [run, --no-masking, --, sh, -c, "echo $DB_USER:$DB_PASS"]
+    env:
+      DB_USER: "op://Private/Test Login/username"
+      DB_PASS: "op://Private/Test Login/password"
+    out: "testuser:secret123\n"
+
+  - name: passthrough non-secret env vars
+    args: [run, --, printenv, PLAIN_VAR]
+    env:
+      PLAIN_VAR: "just-a-value"
+    out: "just-a-value\n"
+
+  - name: mixed secret and non-secret env vars
+    args: [run, --no-masking, --, sh, -c, "echo $PLAIN:$SECRET"]
+    env:
+      PLAIN: "hello"
+      SECRET: "op://Private/Test Login/password"
+    out: "hello:secret123\n"
+
+  # --env-file flag
+  - name: env file basic
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    files:
+      .env: "DB_PASSWORD=op://Private/Test Login/password"
+    out: "secret123\n"
+
+  - name: env file with spaces around equals
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    files:
+      .env: "DB_PASSWORD = op://Private/Test Login/password"
+    out: "secret123\n"
+
+  - name: env file multiple vars
+    args: [run, --no-masking, --env-file, .env, --, sh, -c, "echo $DB_USER:$DB_PASS"]
+    files:
+      .env: |
+        DB_USER=op://Private/Test Login/username
+        DB_PASS=op://Private/Test Login/password
+    out: "testuser:secret123\n"
+
+  - name: env file ignores comments and blank lines
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    files:
+      .env: |
+        # This is a comment
+
+        DB_PASSWORD=op://Private/Test Login/password
+        # Another comment
+    out: "secret123\n"
+
+  - name: env file overrides shell env
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    env:
+      DB_PASSWORD: "op://Private/Test Login/username"
+    files:
+      .env: "DB_PASSWORD=op://Private/Test Login/password"
+    out: "secret123\n"
+
+  - name: multiple env files last wins
+    args: [run, --no-masking, --env-file, .env1, --env-file, .env2, --, printenv, DB_PASSWORD]
+    files:
+      .env1: "DB_PASSWORD=op://Private/Test Login/username"
+      .env2: "DB_PASSWORD=op://Private/Test Login/password"
+    out: "secret123\n"
+
+  # Variable substitution in secret references
+  - name: variable substitution in reference
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    env:
+      VAULT_NAME: "Private"
+    files:
+      .env: "DB_PASSWORD=op://$VAULT_NAME/Test Login/password"
+    out: "secret123\n"
+
+  - name: variable substitution multiple vars
+    args: [run, --no-masking, --env-file, .env, --, printenv, CREDENTIAL]
+    env:
+      VAULT: "Private"
+      ITEM: "Test API Key"
+    files:
+      .env: "CREDENTIAL=op://$VAULT/$ITEM/credential"
+    out: "api-key-12345\n"
+
+  # Masking
+  - name: mask secrets in stdout
+    args: [run, --, sh, -c, "echo secret123"]
+    env:
+      SECRET: "op://Private/Test Login/password"
+    out: "<concealed>\n"
+
+  - name: no-masking shows secrets
+    args: [run, --no-masking, --, sh, -c, "echo secret123"]
+    env:
+      SECRET: "op://Private/Test Login/password"
+    out: "secret123\n"
+
+  - name: mask multiple secrets
+    args: [run, --, sh, -c, "echo secret123 and testuser"]
+    env:
+      PASS: "op://Private/Test Login/password"
+      USER: "op://Private/Test Login/username"
+    out: "<concealed> and <concealed>\n"
+
+  - name: mask secrets in stderr
+    args: [run, --, sh, -c, "echo secret123 >&2"]
+    env:
+      SECRET: "op://Private/Test Login/password"
+    err: "<concealed>\n"
+
+  # Error cases
+  - name: vault not found
+    args: [run, --, printenv, SECRET]
+    env:
+      SECRET: "op://NoSuchVault/item/field"
+    err: "Error: failed to resolve SECRET: vault not found: NoSuchVault\n"
+    code: 1
+
+  - name: item not found
+    args: [run, --, printenv, SECRET]
+    env:
+      SECRET: "op://Private/NoSuchItem/field"
+    err: "Error: failed to resolve SECRET: item not found: NoSuchItem\n"
+    code: 1
+
+  - name: field not found
+    args: [run, --, printenv, SECRET]
+    env:
+      SECRET: "op://Private/Test Login/nosuchfield"
+    err: "Error: failed to resolve SECRET: field not found: nosuchfield\n"
+    code: 1
+
+  - name: env file not found
+    args: [run, --env-file, nonexistent.env, --, echo, hi]
+    err: "Error: failed to read env file nonexistent.env: "
+    code: 1
+
+  - name: command exit code propagates
+    args: [run, --, sh, -c, "exit 42"]
+    code: 42
+
+  - name: no command provided
+    args: [run]
+    err: "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>..."
+    code: 1

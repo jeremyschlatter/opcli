@@ -129,9 +129,12 @@ func (e *testEnv) baseEnv() []string {
 }
 
 // runCLI runs the CLI with the given args in workDir and returns stdout, stderr, and exit code
-func (e *testEnv) runCLI(workDir, stdin string, args ...string) (stdout, stderr string, exitCode int) {
+func (e *testEnv) runCLI(workDir, stdin string, extraEnv map[string]string, args ...string) (stdout, stderr string, exitCode int) {
 	cmd := exec.Command(e.binPath, args...)
 	cmd.Env = e.baseEnv()
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.Dir = workDir
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -160,6 +163,7 @@ type yamlTestCase struct {
 	Err    string            `yaml:"err"`
 	Code   int               `yaml:"code"`
 	Files  map[string]string `yaml:"files"`
+	Env    map[string]string `yaml:"env"`
 	Outputs map[string]struct {
 		Content string      `yaml:"content"`
 		Mode    os.FileMode `yaml:"mode"`
@@ -204,7 +208,7 @@ func TestE2E(t *testing.T) {
 						}
 					}
 
-					stdout, stderr, code := env.runCLI(workDir, tc.Stdin, tc.Args...)
+					stdout, stderr, code := env.runCLI(workDir, tc.Stdin, tc.Env, tc.Args...)
 
 					if code != tc.Code {
 						t.Errorf("exit code: got %d, want %d\nstderr: %s", code, tc.Code, stderr)
@@ -214,8 +218,17 @@ func TestE2E(t *testing.T) {
 						t.Errorf("stdout:\ngot:  %q\nwant: %q", stdout, tc.Out)
 					}
 
-					if tc.Err != "" && stderr != tc.Err {
-						t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
+					// For stderr, support prefix matching when expected doesn't end with \n
+					if tc.Err != "" {
+						if strings.HasSuffix(tc.Err, "\n") {
+							if stderr != tc.Err {
+								t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
+							}
+						} else {
+							if !strings.HasPrefix(stderr, tc.Err) {
+								t.Errorf("stderr:\ngot:  %q\nwant prefix: %q", stderr, tc.Err)
+							}
+						}
 					}
 
 					// Check output files
@@ -246,7 +259,7 @@ func TestE2E_Version(t *testing.T) {
 	env := setupTestEnv(t)
 	defer env.cleanup(t)
 
-	stdout, _, code := env.runCLI("", "", "version")
+	stdout, _, code := env.runCLI("", "", nil, "version")
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}

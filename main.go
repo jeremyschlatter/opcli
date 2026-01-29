@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"math/big"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -127,6 +128,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "run":
+		code, err := cmdRun(args[2:], accountFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(code)
 	case "version", "--version", "-v":
 		fmt.Printf("opcli %s\n", Version)
 	default:
@@ -146,6 +154,8 @@ func printUsage() {
 	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
 	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
+	fmt.Println("  opcli run [--env-file=<file>]... -- <command>")
+	fmt.Println("                                       - Run command with secrets as env vars")
 	fmt.Println("  opcli account list                   - List all accounts")
 	fmt.Println("  opcli account forget [<acct>]        - Remove an account")
 	fmt.Println()
@@ -1273,6 +1283,207 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	_, err = os.Stdout.WriteString(output)
 	return err
+}
+
+func cmdRun(args []string, accountFlag string) (int, error) {
+	var envFiles []string
+	var noMasking bool
+	var cmdArgs []string
+
+	// Parse flags until we hit --
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			cmdArgs = args[i+1:]
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			printRunUsage()
+			return 0, nil
+		}
+		if arg == "--env-file" && i+1 < len(args) {
+			i++
+			envFiles = append(envFiles, args[i])
+		} else if strings.HasPrefix(arg, "--env-file=") {
+			envFiles = append(envFiles, strings.TrimPrefix(arg, "--env-file="))
+		} else if arg == "--no-masking" {
+			noMasking = true
+		} else if strings.HasPrefix(arg, "-") {
+			return 0, fmt.Errorf("unknown flag: %s", arg)
+		}
+	}
+
+	if len(cmdArgs) == 0 {
+		printRunUsage()
+		return 1, nil
+	}
+
+	// Collect environment: start with current env
+	env := make(map[string]string)
+	for _, e := range os.Environ() {
+		if idx := strings.Index(e, "="); idx != -1 {
+			env[e[:idx]] = e[idx+1:]
+		}
+	}
+
+	// Load env files (later files override earlier)
+	for _, f := range envFiles {
+		fileEnv, err := parseEnvFile(f, env)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read env file %s: %w", f, err)
+		}
+		for k, v := range fileEnv {
+			env[k] = v
+		}
+	}
+
+	// Find op:// references and collect secrets to resolve
+	secretRefs := make(map[string]string) // env var name -> op:// URI
+	for k, v := range env {
+		// Expand variables in the value
+		expanded := os.Expand(v, func(name string) string {
+			if val, ok := env[name]; ok {
+				return val
+			}
+			return ""
+		})
+		env[k] = expanded
+
+		if strings.HasPrefix(expanded, "op://") {
+			secretRefs[k] = expanded
+		}
+	}
+
+	// Resolve secrets if any
+	var secrets map[string]string
+	if len(secretRefs) > 0 {
+		vk, err := openVaultKeychain(accountFlag)
+		if err != nil {
+			return 0, err
+		}
+		defer vk.Close()
+
+		secrets = make(map[string]string)
+		for name, uri := range secretRefs {
+			value, err := readSecret(vk, uri)
+			if err != nil {
+				return 0, fmt.Errorf("failed to resolve %s: %w", name, err)
+			}
+			secrets[uri] = value
+			env[name] = value
+		}
+	}
+
+	// Build final environment slice
+	var finalEnv []string
+	for k, v := range env {
+		finalEnv = append(finalEnv, k+"="+v)
+	}
+
+	// Run the command
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	cmd.Env = finalEnv
+
+	if noMasking || len(secrets) == 0 {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		// Collect unique secret values for masking
+		secretValues := make([]string, 0, len(secrets))
+		for _, v := range secrets {
+			secretValues = append(secretValues, v)
+		}
+		cmd.Stdout = &maskingWriter{w: os.Stdout, secrets: secretValues}
+		cmd.Stderr = &maskingWriter{w: os.Stderr, secrets: secretValues}
+	}
+
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), nil
+		}
+		return 0, err
+	}
+	return 0, nil
+}
+
+// parseEnvFile parses a dotenv-style file and returns key-value pairs.
+// Variables in values are expanded using the provided env map.
+func parseEnvFile(path string, env map[string]string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		idx := strings.Index(line, "=")
+		if idx == -1 {
+			continue
+		}
+
+		key := strings.TrimSpace(line[:idx])
+		value := strings.TrimSpace(line[idx+1:])
+
+		// Expand variables in the value using both env and already-parsed results
+		value = os.Expand(value, func(name string) string {
+			if val, ok := result[name]; ok {
+				return val
+			}
+			if val, ok := env[name]; ok {
+				return val
+			}
+			return ""
+		})
+
+		result[key] = value
+	}
+
+	return result, nil
+}
+
+// maskingWriter replaces secret values with <concealed> in output
+type maskingWriter struct {
+	w       io.Writer
+	secrets []string
+}
+
+func (m *maskingWriter) Write(p []byte) (n int, err error) {
+	s := string(p)
+	for _, secret := range m.secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "<concealed>")
+		}
+	}
+	_, err = m.w.Write([]byte(s))
+	return len(p), err
+}
+
+func printRunUsage() {
+	fmt.Fprintln(os.Stderr, "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>...")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Run a command with secrets loaded as environment variables.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Scans environment variables for op:// secret references and resolves them")
+	fmt.Fprintln(os.Stderr, "before running the command. Secrets in stdout/stderr are masked by default.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Flags:")
+	fmt.Fprintln(os.Stderr, "  --env-file <file>  Load environment from a dotenv file (can be repeated)")
+	fmt.Fprintln(os.Stderr, "  --no-masking       Show secrets in command output (don't mask)")
+	fmt.Fprintln(os.Stderr, "  -h, --help         Show this help message")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Environment file precedence:")
+	fmt.Fprintln(os.Stderr, "  - Later --env-file arguments override earlier ones")
+	fmt.Fprintln(os.Stderr, "  - Env files override shell environment variables")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Variable substitution:")
+	fmt.Fprintln(os.Stderr, "  Secret references can use $VAR syntax: op://$VAULT/item/field")
 }
 
 // readSecret reads a secret value from a URI using an already-opened vault keychain.
