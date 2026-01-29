@@ -52,11 +52,14 @@ func getSessionPath() (string, error) {
 	return filepath.Join(dir, sessionFile), nil
 }
 
+// testSessionKey can be set by test builds to override session key detection.
+var testSessionKey string
+
 // getSessionKey returns a unique key for the current terminal session.
 // Based on TTY device + TTY start time, ensuring uniqueness even after TTY reuse.
 func getSessionKey() (string, error) {
-	if k := os.Getenv("OPCLI_TEST_SESSION_KEY"); k != "" {
-		return k, nil
+	if testSessionKey != "" {
+		return testSessionKey, nil
 	}
 
 	// Get the actual TTY device path (e.g., /dev/ttys001)
