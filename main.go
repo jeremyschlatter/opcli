@@ -599,14 +599,13 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	// Non-primary keysets need their parent's RSA key
 	if keyset.EncryptedBy != vk.primaryKeysetID {
 		vk.keysetMu.RLock()
-		parentRSA, ok := vk.keysetRSAKeys[keyset.EncryptedBy]
+		var ok bool
+		parentRSA, ok = vk.keysetRSAKeys[keyset.EncryptedBy]
 		vk.keysetMu.RUnlock()
 		if !ok {
 			return nil, fmt.Errorf("cannot decrypt keyset %s: parent keyset %s unavailable",
 				keysetUUID, keyset.EncryptedBy)
 		}
-		// Use parent RSA key for decryption below
-		_ = parentRSA
 	}
 
 	// Decrypt sym key using primary RSA (no lock needed for decryption)
