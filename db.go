@@ -264,32 +264,3 @@ func getItemDetail(db *sql.DB, itemID int64) (*ItemDetail, error) {
 	return &detail, nil
 }
 
-// getAllItemOverviews retrieves all item overviews (for searching across vaults)
-func getAllItemOverviews(db *sql.DB) ([]ItemOverview, error) {
-	rows, err := db.Query(`
-		SELECT id, uuid, vault_id, template_uuid, enc_overview
-		FROM item_overviews
-		WHERE trashed = 0
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query items: %w", err)
-	}
-	defer rows.Close()
-
-	var items []ItemOverview
-	for rows.Next() {
-		var item ItemOverview
-		var encOverview []byte
-		if err := rows.Scan(&item.ID, &item.UUID, &item.VaultID, &item.TemplateUUID, &encOverview); err != nil {
-			return nil, fmt.Errorf("failed to scan item row: %w", err)
-		}
-
-		if err := json.Unmarshal(encOverview, &item.EncOverview); err != nil {
-			return nil, fmt.Errorf("failed to parse encrypted overview: %w", err)
-		}
-
-		items = append(items, item)
-	}
-
-	return items, nil
-}

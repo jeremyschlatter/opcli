@@ -422,7 +422,7 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 
 // VaultKeychain holds decrypted keys for accessing vault items
 type VaultKeychain struct {
-	db              *DB
+	db              *sql.DB
 	accountID       int64                      // internal DB account ID
 	accountType     string                     // I=Individual, F=Family, T=Teams, B=Business
 	primaryKeysetID string                     // UUID of the primary keyset
@@ -432,9 +432,6 @@ type VaultKeychain struct {
 	vaultKeys       map[string][]byte          // vault UUID -> symmetric key
 }
 
-type DB struct {
-	*sql.DB
-}
 
 func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
 	db, err := openDB()
@@ -443,7 +440,7 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 	}
 
 	vk := &VaultKeychain{
-		db:            &DB{db},
+		db:            db,
 		accountID:     accountID,
 		accountType:   accountType,
 		keysetRSAKeys: make(map[string]*rsa.PrivateKey),
@@ -498,9 +495,7 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 }
 
 func (vk *VaultKeychain) Close() {
-	if vk.db != nil {
-		vk.db.Close()
-	}
+	vk.db.Close()
 }
 
 // getKeysetRSAKey returns the RSA private key for a keyset, decrypting it if needed
@@ -510,7 +505,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	}
 
 	// Get the keyset
-	keyset, err := getKeyset(vk.db.DB, vk.accountID, keysetUUID)
+	keyset, err := getKeyset(vk.db, vk.accountID, keysetUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keyset %s: %w", keysetUUID, err)
 	}
@@ -617,12 +612,12 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 	}
 
 	// Get vault data
-	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, vaultUUID)
+	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
 	if err != nil {
 		return nil, err
 	}
 
-	vault, err := getVaultByID(vk.db.DB, vaultID)
+	vault, err := getVaultByID(vk.db, vaultID)
 	if err != nil {
 		return nil, err
 	}
@@ -698,6 +693,80 @@ func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedDa
 	}
 
 	return &item, nil
+}
+
+// decryptVaultName decrypts the vault attributes and returns the display name and raw name.
+func (vk *VaultKeychain) decryptVaultName(v *Vault) (displayName, rawName string, err error) {
+	var encAttrs EncryptedData
+	if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
+		return "", "", fmt.Errorf("failed to parse vault attrs: %w", err)
+	}
+
+	key, err := vk.getVaultKey(v.VaultUUID)
+	if err != nil {
+		return "", "", err
+	}
+
+	attrsJSON, err := decryptEncryptedData(&encAttrs, key)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to decrypt vault attrs: %w", err)
+	}
+
+	var attrs struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
+		return "", "", fmt.Errorf("failed to parse decrypted attrs: %w", err)
+	}
+
+	return vaultDisplayName(v.VaultType, vk.accountType, attrs.Name), attrs.Name, nil
+}
+
+// findVaultByName finds a vault by name or UUID.
+func (vk *VaultKeychain) findVaultByName(vaultName string) (string, error) {
+	vaults, err := getVaults(vk.db, vk.accountID)
+	if err != nil {
+		return "", err
+	}
+
+	for _, v := range vaults {
+		displayName, rawName, err := vk.decryptVaultName(&v)
+		if err != nil {
+			continue
+		}
+
+		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(rawName, vaultName) || v.VaultUUID == vaultName {
+			return v.VaultUUID, nil
+		}
+	}
+
+	return "", fmt.Errorf("vault not found: %s", vaultName)
+}
+
+// findItemByName finds an item in a vault by title or UUID.
+func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*ItemOverview, error) {
+	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := getItemOverviews(vk.db, vaultID)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range items {
+		overview, err := vk.decryptOverview(vaultUUID, &items[i].EncOverview)
+		if err != nil {
+			continue
+		}
+
+		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
+			return &items[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("item not found: %s", itemName)
 }
 
 // parseOPURI parses an op://vault/item/[section/]field URI
@@ -781,91 +850,26 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 	defer vk.Close()
 
-	// Find the vault
-	vaults, err := getVaults(vk.db.DB, vk.accountID)
+	vaultUUID, err := vk.findVaultByName(vaultName)
 	if err != nil {
 		return err
 	}
 
-	var targetVaultUUID string
-	for _, v := range vaults {
-		// Decrypt vault attributes to get the name
-		var encAttrs EncryptedData
-		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-			continue
-		}
-
-		key, err := vk.getVaultKey(v.VaultUUID)
-		if err != nil {
-			continue
-		}
-
-		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
-		if err != nil {
-			continue
-		}
-
-		var attrs struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-			continue
-		}
-
-		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
-		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
-			targetVaultUUID = v.VaultUUID
-			break
-		}
-	}
-
-	if targetVaultUUID == "" {
-		return fmt.Errorf("vault not found: %s", vaultName)
-	}
-
-	// Get vault ID
-	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
+	item, err := vk.findItemByName(vaultUUID, itemName)
 	if err != nil {
 		return err
 	}
 
-	// Get all items in the vault
-	items, err := getItemOverviews(vk.db.DB, vaultID)
+	detail, err := getItemDetail(vk.db, item.ID)
 	if err != nil {
 		return err
 	}
 
-	// Find matching item
-	var targetItem *ItemOverview
-	for i := range items {
-		overview, err := vk.decryptOverview(targetVaultUUID, &items[i].EncOverview)
-		if err != nil {
-			continue
-		}
-
-		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
-			targetItem = &items[i]
-			break
-		}
-	}
-
-	if targetItem == nil {
-		return fmt.Errorf("item not found: %s", itemName)
-	}
-
-	// Get item details
-	detail, err := getItemDetail(vk.db.DB, targetItem.ID)
+	decryptedItem, err := vk.decryptDetail(vaultUUID, &detail.EncDetails)
 	if err != nil {
 		return err
 	}
 
-	// Decrypt details
-	decryptedItem, err := vk.decryptDetail(targetVaultUUID, &detail.EncDetails)
-	if err != nil {
-		return err
-	}
-
-	// Find the field
 	value, err := findField(decryptedItem, sectionName, fieldName)
 	if err != nil {
 		return err
@@ -1001,7 +1005,7 @@ func cmdList(accountFlag string) error {
 	}
 	defer vk.Close()
 
-	vaults, err := getVaults(vk.db.DB, vk.accountID)
+	vaults, err := getVaults(vk.db, vk.accountID)
 	if err != nil {
 		return err
 	}
@@ -1018,33 +1022,13 @@ func cmdList(accountFlag string) error {
 			continue
 		}
 
-		var encAttrs EncryptedData
-		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to parse attrs)", v.VaultUUID})
-			continue
-		}
-
-		key, err := vk.getVaultKey(v.VaultUUID)
+		displayName, _, err := vk.decryptVaultName(&v)
 		if err != nil {
-			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to get key)", v.VaultUUID})
+			// Show partial info for vaults we can't decrypt
+			entries = append(entries, vaultEntry{v.VaultUUID + " (decrypt failed)", v.VaultUUID})
 			continue
 		}
 
-		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
-		if err != nil {
-			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to decrypt)", v.VaultUUID})
-			continue
-		}
-
-		var attrs struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-			entries = append(entries, vaultEntry{v.VaultUUID + " (failed to parse decrypted)", v.VaultUUID})
-			continue
-		}
-
-		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
 		entries = append(entries, vaultEntry{displayName, v.VaultUUID})
 	}
 
@@ -1061,7 +1045,6 @@ func cmdList(accountFlag string) error {
 }
 
 func cmdGet(uri string, accountFlag string) error {
-	// Parse URI - allow op://vault/item (without field)
 	if !strings.HasPrefix(uri, "op://") {
 		return fmt.Errorf("invalid URI: must start with op://")
 	}
@@ -1077,76 +1060,22 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	defer vk.Close()
 
-	// Find vault
-	vaults, err := getVaults(vk.db.DB, vk.accountID)
+	vaultUUID, err := vk.findVaultByName(vaultName)
 	if err != nil {
 		return err
 	}
 
-	var targetVaultUUID string
-	for _, v := range vaults {
-		var encAttrs EncryptedData
-		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-			continue
-		}
-		key, err := vk.getVaultKey(v.VaultUUID)
-		if err != nil {
-			continue
-		}
-		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
-		if err != nil {
-			continue
-		}
-		var attrs struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-			continue
-		}
-		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
-		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
-			targetVaultUUID = v.VaultUUID
-			break
-		}
-	}
-
-	if targetVaultUUID == "" {
-		return fmt.Errorf("vault not found: %s", vaultName)
-	}
-
-	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
+	item, err := vk.findItemByName(vaultUUID, itemName)
 	if err != nil {
 		return err
 	}
 
-	items, err := getItemOverviews(vk.db.DB, vaultID)
+	detail, err := getItemDetail(vk.db, item.ID)
 	if err != nil {
 		return err
 	}
 
-	var targetItem *ItemOverview
-	for i := range items {
-		overview, err := vk.decryptOverview(targetVaultUUID, &items[i].EncOverview)
-		if err != nil {
-			continue
-		}
-		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
-			targetItem = &items[i]
-			break
-		}
-	}
-
-	if targetItem == nil {
-		return fmt.Errorf("item not found: %s", itemName)
-	}
-
-	detail, err := getItemDetail(vk.db.DB, targetItem.ID)
-	if err != nil {
-		return err
-	}
-
-	// Decrypt and dump raw JSON
-	key, err := vk.getVaultKey(targetVaultUUID)
+	key, err := vk.getVaultKey(vaultUUID)
 	if err != nil {
 		return err
 	}
@@ -1156,9 +1085,7 @@ func cmdGet(uri string, accountFlag string) error {
 		return err
 	}
 
-	// Pretty print the JSON
-	var raw json.RawMessage = decrypted
-	pretty, err := json.MarshalIndent(raw, "", "  ")
+	pretty, err := json.MarshalIndent(json.RawMessage(decrypted), "", "  ")
 	if err != nil {
 		fmt.Println(string(decrypted))
 	} else {
@@ -1552,90 +1479,26 @@ func readSecret(vk *VaultKeychain, uri string) (string, error) {
 		return "", err
 	}
 
-	// Find the vault
-	vaults, err := getVaults(vk.db.DB, vk.accountID)
+	vaultUUID, err := vk.findVaultByName(vaultName)
 	if err != nil {
 		return "", err
 	}
 
-	var targetVaultUUID string
-	for _, v := range vaults {
-		var encAttrs EncryptedData
-		if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-			continue
-		}
-
-		key, err := vk.getVaultKey(v.VaultUUID)
-		if err != nil {
-			continue
-		}
-
-		attrsJSON, err := decryptEncryptedData(&encAttrs, key)
-		if err != nil {
-			continue
-		}
-
-		var attrs struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(attrsJSON, &attrs); err != nil {
-			continue
-		}
-
-		displayName := vaultDisplayName(v.VaultType, vk.accountType, attrs.Name)
-		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(attrs.Name, vaultName) || v.VaultUUID == vaultName {
-			targetVaultUUID = v.VaultUUID
-			break
-		}
-	}
-
-	if targetVaultUUID == "" {
-		return "", fmt.Errorf("vault not found: %s", vaultName)
-	}
-
-	// Get vault ID
-	vaultID, err := getVaultIDByUUID(vk.db.DB, vk.accountID, targetVaultUUID)
+	item, err := vk.findItemByName(vaultUUID, itemName)
 	if err != nil {
 		return "", err
 	}
 
-	// Get all items in the vault
-	items, err := getItemOverviews(vk.db.DB, vaultID)
+	detail, err := getItemDetail(vk.db, item.ID)
 	if err != nil {
 		return "", err
 	}
 
-	// Find matching item
-	var targetItem *ItemOverview
-	for i := range items {
-		overview, err := vk.decryptOverview(targetVaultUUID, &items[i].EncOverview)
-		if err != nil {
-			continue
-		}
-
-		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
-			targetItem = &items[i]
-			break
-		}
-	}
-
-	if targetItem == nil {
-		return "", fmt.Errorf("item not found: %s", itemName)
-	}
-
-	// Get item details
-	detail, err := getItemDetail(vk.db.DB, targetItem.ID)
+	decryptedItem, err := vk.decryptDetail(vaultUUID, &detail.EncDetails)
 	if err != nil {
 		return "", err
 	}
 
-	// Decrypt details
-	decryptedItem, err := vk.decryptDetail(targetVaultUUID, &detail.EncDetails)
-	if err != nil {
-		return "", err
-	}
-
-	// Find the field
 	return findField(decryptedItem, sectionName, fieldName)
 }
 

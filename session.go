@@ -159,8 +159,7 @@ func loadSessions() (*SessionStore, error) {
 
 	var store SessionStore
 	if err := json.Unmarshal(data, &store); err != nil {
-		// Corrupted file, start fresh
-		return &SessionStore{Sessions: make(map[string]*Session)}, nil
+		return nil, fmt.Errorf("failed to parse session store: %w", err)
 	}
 
 	if store.Sessions == nil {

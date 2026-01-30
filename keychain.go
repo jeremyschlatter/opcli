@@ -162,8 +162,6 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -249,15 +247,20 @@ func keychainDelete(account string) error {
 }
 
 // loadCredentialStore loads the credential store from keychain.
+// Returns an empty store if no credentials exist yet.
 func loadCredentialStore() (*CredentialStore, error) {
 	data, err := keychainGet(keychainCredentials)
 	if err != nil {
-		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
+		// Not found is expected for fresh installs
+		if strings.Contains(err.Error(), "not found") {
+			return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
+		}
+		return nil, err
 	}
 
 	var store CredentialStore
 	if err := json.Unmarshal([]byte(data), &store); err != nil {
-		return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
+		return nil, fmt.Errorf("failed to parse credential store: %w", err)
 	}
 
 	if store.Accounts == nil {
@@ -462,10 +465,4 @@ func ExtractShorthand(signInURL string) string {
 		return parts[0]
 	}
 	return ""
-}
-
-func generateRandomString(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:n]
 }
