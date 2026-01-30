@@ -16,13 +16,16 @@ char* getTTYName() {
 */
 import "C"
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -75,6 +78,39 @@ func getSessionPath() (string, error) {
 // testSessionKey can be set by test builds to override session key detection.
 var testSessionKey string
 
+// findAncestorTTY walks up the process tree to find an ancestor with a TTY.
+// This handles cases like hyperfine where the current process has no TTY
+// but an ancestor (the shell) does.
+func findAncestorTTY() string {
+	pid := os.Getppid()
+	for pid > 1 {
+		// Use ps to get the TTY for this process
+		out, err := exec.Command("ps", "-o", "tty=,ppid=", "-p", fmt.Sprintf("%d", pid)).Output()
+		if err != nil {
+			break
+		}
+		fields := strings.Fields(string(bytes.TrimSpace(out)))
+		if len(fields) < 2 {
+			break
+		}
+		tty := fields[0]
+		if tty != "??" && tty != "" {
+			// Found a TTY - convert to device path
+			if strings.HasPrefix(tty, "ttys") {
+				return "/dev/" + tty
+			}
+			return "/dev/tty" + tty
+		}
+		// Move to parent
+		var ppid int
+		if _, err := fmt.Sscanf(fields[1], "%d", &ppid); err != nil || ppid <= 1 {
+			break
+		}
+		pid = ppid
+	}
+	return ""
+}
+
 // getSessionKey returns a unique key for the current terminal session.
 // Based on TTY device + TTY start time, ensuring uniqueness even after TTY reuse.
 func getSessionKey() (string, error) {
@@ -83,11 +119,16 @@ func getSessionKey() (string, error) {
 	}
 
 	// Get the actual TTY device path (e.g., /dev/ttys001)
-	cTTY := C.getTTYName()
-	if cTTY == nil {
+	var ttyPath string
+	if cTTY := C.getTTYName(); cTTY != nil {
+		ttyPath = C.GoString(cTTY)
+	} else if ancestorTTY := findAncestorTTY(); ancestorTTY != "" {
+		// Walk up process tree to find an ancestor with a TTY
+		// (handles running inside hyperfine, etc.)
+		ttyPath = ancestorTTY
+	} else {
 		return "", fmt.Errorf("no controlling terminal")
 	}
-	ttyPath := C.GoString(cTTY)
 
 	// Get the TTY's creation/start time
 	var stat syscall.Stat_t
