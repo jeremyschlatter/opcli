@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -477,7 +478,9 @@ type VaultKeychain struct {
 	primarySymKey   []byte                     // Decrypted primary symmetric key
 	keysetRSAKeys   map[string]*rsa.PrivateKey // keyset UUID -> RSA private key
 	keysetSymKeys   map[string][]byte          // keyset UUID -> symmetric key
+	keysetMu        sync.RWMutex               // protects keysetRSAKeys and keysetSymKeys
 	vaultKeys       map[string][]byte          // vault UUID -> symmetric key
+	vaultKeysMu     sync.RWMutex               // protects vaultKeys for concurrent access
 }
 
 
@@ -577,69 +580,36 @@ func (vk *VaultKeychain) Close() {
 
 // getKeysetRSAKey returns the RSA private key for a keyset, decrypting it if needed
 func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, error) {
+	// Check cache with read lock
+	vk.keysetMu.RLock()
 	if rsaKey, ok := vk.keysetRSAKeys[keysetUUID]; ok {
+		vk.keysetMu.RUnlock()
 		return rsaKey, nil
 	}
+	// Get parent RSA key while holding read lock (primary is always available)
+	parentRSA := vk.keysetRSAKeys[vk.primaryKeysetID]
+	vk.keysetMu.RUnlock()
 
-	// Get the keyset
+	// Get the keyset (no lock needed for DB read)
 	keyset, err := getKeyset(vk.db, vk.accountID, keysetUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keyset %s: %w", keysetUUID, err)
 	}
 
-	// Check if this keyset is encrypted by our primary keyset
+	// Non-primary keysets need their parent's RSA key
 	if keyset.EncryptedBy != vk.primaryKeysetID {
-		// Try to get the parent keyset's RSA key recursively
-		parentRSA, err := vk.getKeysetRSAKey(keyset.EncryptedBy)
-		if err != nil {
-			return nil, fmt.Errorf("cannot decrypt keyset %s: parent keyset %s unavailable: %w",
-				keysetUUID, keyset.EncryptedBy, err)
+		vk.keysetMu.RLock()
+		parentRSA, ok := vk.keysetRSAKeys[keyset.EncryptedBy]
+		vk.keysetMu.RUnlock()
+		if !ok {
+			return nil, fmt.Errorf("cannot decrypt keyset %s: parent keyset %s unavailable",
+				keysetUUID, keyset.EncryptedBy)
 		}
-
-		// Decrypt this keyset's symmetric key using parent's RSA key
-		var encSymKey EncryptedData
-		if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
-			return nil, fmt.Errorf("failed to parse keyset sym key: %w", err)
-		}
-
-		symKeyData, err := base64URLDecode(encSymKey.Data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode keyset sym key: %w", err)
-		}
-
-		decryptedSymKeyJSON, err := rsaDecryptOAEP(parentRSA, symKeyData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to RSA decrypt keyset sym key: %w", err)
-		}
-
-		symKey, err := extractSymmetricKey(decryptedSymKeyJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract keyset sym key: %w", err)
-		}
-		vk.keysetSymKeys[keysetUUID] = symKey
-
-		// Decrypt the RSA private key using the symmetric key
-		var encPriKey EncryptedData
-		if err := json.Unmarshal([]byte(keyset.EncPriKey), &encPriKey); err != nil {
-			return nil, fmt.Errorf("failed to parse keyset private key: %w", err)
-		}
-
-		decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, symKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt keyset private key: %w", err)
-		}
-
-		rsaKey, err := parseRSAPrivateKey(decryptedPriKeyJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse keyset RSA key: %w", err)
-		}
-
-		vk.keysetRSAKeys[keysetUUID] = rsaKey
-		return rsaKey, nil
+		// Use parent RSA key for decryption below
+		_ = parentRSA
 	}
 
-	// This keyset is encrypted by the primary keyset
-	// Decrypt sym key using primary RSA
+	// Decrypt sym key using primary RSA (no lock needed for decryption)
 	var encSymKey EncryptedData
 	if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
 		return nil, fmt.Errorf("failed to parse keyset sym key: %w", err)
@@ -650,8 +620,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 		return nil, fmt.Errorf("failed to decode keyset sym key: %w", err)
 	}
 
-	primaryRSA := vk.keysetRSAKeys[vk.primaryKeysetID]
-	decryptedSymKeyJSON, err := rsaDecryptOAEP(primaryRSA, symKeyData)
+	decryptedSymKeyJSON, err := rsaDecryptOAEP(parentRSA, symKeyData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to RSA decrypt keyset sym key: %w", err)
 	}
@@ -660,7 +629,6 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract keyset sym key: %w", err)
 	}
-	vk.keysetSymKeys[keysetUUID] = symKey
 
 	// Decrypt the RSA private key
 	var encPriKey EncryptedData
@@ -678,15 +646,24 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 		return nil, fmt.Errorf("failed to parse keyset RSA key: %w", err)
 	}
 
+	// Cache result (write lock)
+	vk.keysetMu.Lock()
+	vk.keysetSymKeys[keysetUUID] = symKey
 	vk.keysetRSAKeys[keysetUUID] = rsaKey
+	vk.keysetMu.Unlock()
+
 	return rsaKey, nil
 }
 
 // getVaultKey retrieves or decrypts the vault key for the given vault UUID
 func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
+	// Check cache first (read lock)
+	vk.vaultKeysMu.RLock()
 	if key, ok := vk.vaultKeys[vaultUUID]; ok {
+		vk.vaultKeysMu.RUnlock()
 		return key, nil
 	}
+	vk.vaultKeysMu.RUnlock()
 
 	// Get vault data
 	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
@@ -728,7 +705,11 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to extract vault symmetric key: %w", err)
 	}
 
+	// Cache the key (write lock)
+	vk.vaultKeysMu.Lock()
 	vk.vaultKeys[vaultUUID] = key
+	vk.vaultKeysMu.Unlock()
+
 	return key, nil
 }
 
@@ -813,17 +794,49 @@ func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (strin
 		t.mark(fmt.Sprintf("    getVaults (%d vaults)", len(vaults)))
 	}
 
-	for i, v := range vaults {
-		displayName, rawName, err := vk.decryptVaultName(&v)
-		if err != nil {
-			continue
-		}
-
-		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(rawName, vaultName) || v.VaultUUID == vaultName {
+	// Check for UUID match first (no decryption needed)
+	for _, v := range vaults {
+		if v.VaultUUID == vaultName {
 			if t != nil {
-				t.mark(fmt.Sprintf("    decrypt %d vault names", i+1))
+				t.mark("    matched by UUID")
 			}
 			return v.VaultUUID, nil
+		}
+	}
+
+	// Decrypt all vault names in parallel
+	type vaultResult struct {
+		index       int
+		uuid        string
+		displayName string
+		rawName     string
+	}
+	results := make(chan vaultResult, len(vaults))
+	for i, v := range vaults {
+		go func(idx int, vault Vault) {
+			displayName, rawName, err := vk.decryptVaultName(&vault)
+			if err != nil {
+				results <- vaultResult{index: idx}
+				return
+			}
+			results <- vaultResult{idx, vault.VaultUUID, displayName, rawName}
+		}(i, v)
+	}
+
+	// Collect results and check for match
+	decrypted := make([]vaultResult, len(vaults))
+	for range vaults {
+		r := <-results
+		decrypted[r.index] = r
+	}
+	if t != nil {
+		t.mark(fmt.Sprintf("    decrypt %d vault names (parallel)", len(vaults)))
+	}
+
+	// Find match
+	for _, r := range decrypted {
+		if r.uuid != "" && (strings.EqualFold(r.displayName, vaultName) || strings.EqualFold(r.rawName, vaultName)) {
+			return r.uuid, nil
 		}
 	}
 
