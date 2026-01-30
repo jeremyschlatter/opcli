@@ -165,7 +165,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -218,7 +220,14 @@ func keychainGet(account string) (string, error) {
 	var outPassword *C.char
 	var outLen C.int
 
+	var t0 time.Time
+	if os.Getenv("OPCLI_TIMING") != "" {
+		t0 = time.Now()
+	}
 	status := C.keychainGet(cService, cAccount, &outPassword, &outLen)
+	if os.Getenv("OPCLI_TIMING") != "" {
+		fmt.Fprintf(os.Stderr, "      [keychainGet %q: %.2fms]\n", account, float64(time.Since(t0).Microseconds())/1000)
+	}
 	if status != 0 {
 		if status == -25300 { // errSecItemNotFound
 			return "", fmt.Errorf("not found in keychain")

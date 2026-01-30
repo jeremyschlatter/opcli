@@ -6,9 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+var dbTimingEnabled = os.Getenv("OPCLI_TIMING") != ""
+
+func logQueryTime(name string, start time.Time) {
+	if dbTimingEnabled {
+		fmt.Fprintf(os.Stderr, "      [sql %s: %.2fms]\n", name, float64(time.Since(start).Microseconds())/1000)
+	}
+}
 
 // testDBPath can be set by test builds to override the database path.
 var testDBPath string
@@ -62,6 +71,7 @@ type AccountInfo struct {
 
 // getAccounts retrieves all accounts from the database.
 func getAccounts(db *sql.DB) ([]AccountInfo, error) {
+	t0 := time.Now()
 	rows, err := db.Query(`
 		SELECT id, account_uuid,
 		       json_extract(data, '$.user_email'),
@@ -69,6 +79,7 @@ func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 		       json_extract(data, '$.account_type')
 		FROM accounts
 	`)
+	logQueryTime("getAccounts", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query accounts: %w", err)
 	}
@@ -92,7 +103,9 @@ func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 // getAccount retrieves account data by UUID.
 func getAccount(db *sql.DB, accountUUID string) (*Account, error) {
 	var data []byte
+	t0 := time.Now()
 	err := db.QueryRow("SELECT data FROM accounts WHERE account_uuid = ?", accountUUID).Scan(&data)
+	logQueryTime("getAccount", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query account: %w", err)
 	}
@@ -108,7 +121,9 @@ func getAccount(db *sql.DB, accountUUID string) (*Account, error) {
 // getAccountIDByUUID gets the internal account ID from UUID.
 func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
 	var id int64
+	t0 := time.Now()
 	err := db.QueryRow("SELECT id FROM accounts WHERE account_uuid = ?", accountUUID).Scan(&id)
+	logQueryTime("getAccountIDByUUID", t0)
 	if err != nil {
 		return 0, fmt.Errorf("account not found: %s", accountUUID)
 	}
@@ -118,6 +133,7 @@ func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
 // getPrimaryKeyset retrieves the primary keyset (encrypted by master password) for an account.
 func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 	var data []byte
+	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT data FROM account_objects
 		WHERE account_id = ?
@@ -125,6 +141,7 @@ func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 		AND json_extract(data, '$.encrypted_by') = 'mp'
 		LIMIT 1
 	`, accountID).Scan(&data)
+	logQueryTime("getPrimaryKeyset", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query primary keyset: %w", err)
 	}
@@ -140,10 +157,12 @@ func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 // getKeyset retrieves a keyset by UUID for an account.
 func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 	var data []byte
+	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT data FROM account_objects
 		WHERE account_id = ? AND object_type = 'keyset' AND uuid = ?
 	`, accountID, uuid).Scan(&data)
+	logQueryTime("getKeyset", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query keyset %s: %w", uuid, err)
 	}
@@ -158,9 +177,11 @@ func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 
 // getVaults retrieves all vaults for an account.
 func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
+	t0 := time.Now()
 	rows, err := db.Query(`
 		SELECT data FROM account_objects WHERE account_id = ? AND object_type = 'vault'
 	`, accountID)
+	logQueryTime("getVaults", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vaults: %w", err)
 	}
@@ -186,9 +207,11 @@ func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
 // getVaultByID retrieves a vault by its internal ID.
 func getVaultByID(db *sql.DB, id int64) (*Vault, error) {
 	var data []byte
+	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT data FROM account_objects WHERE id = ? AND object_type = 'vault'
 	`, id).Scan(&data)
+	logQueryTime("getVaultByID", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vault %d: %w", id, err)
 	}
@@ -204,10 +227,12 @@ func getVaultByID(db *sql.DB, id int64) (*Vault, error) {
 // getVaultIDByUUID gets the internal vault ID from its UUID for an account.
 func getVaultIDByUUID(db *sql.DB, accountID int64, vaultUUID string) (int64, error) {
 	var id int64
+	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT id FROM account_objects
 		WHERE account_id = ? AND object_type = 'vault' AND json_extract(data, '$.vault_uuid') = ?
 	`, accountID, vaultUUID).Scan(&id)
+	logQueryTime("getVaultIDByUUID", t0)
 	if err != nil {
 		return 0, fmt.Errorf("vault not found: %s", vaultUUID)
 	}
@@ -217,11 +242,13 @@ func getVaultIDByUUID(db *sql.DB, accountID int64, vaultUUID string) (int64, err
 // searchItems searches for items matching the given title in the specified vault
 // Returns all matching items (searches in decrypted overviews)
 func getItemOverviews(db *sql.DB, vaultID int64) ([]ItemOverview, error) {
+	t0 := time.Now()
 	rows, err := db.Query(`
 		SELECT id, uuid, vault_id, template_uuid, enc_overview
 		FROM item_overviews
 		WHERE vault_id = ? AND trashed = 0
 	`, vaultID)
+	logQueryTime("getItemOverviews", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query items: %w", err)
 	}
@@ -248,9 +275,11 @@ func getItemOverviews(db *sql.DB, vaultID int64) ([]ItemOverview, error) {
 // getItemDetail retrieves the encrypted details for an item
 func getItemDetail(db *sql.DB, itemID int64) (*ItemDetail, error) {
 	var encDetails []byte
+	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT enc_details FROM item_details WHERE id = ?
 	`, itemID).Scan(&encDetails)
+	logQueryTime("getItemDetail", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query item details: %w", err)
 	}

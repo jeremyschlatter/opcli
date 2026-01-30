@@ -788,18 +788,28 @@ func (vk *VaultKeychain) decryptVaultName(v *Vault) (displayName, rawName string
 
 // findVaultByName finds a vault by name or UUID.
 func (vk *VaultKeychain) findVaultByName(vaultName string) (string, error) {
+	return vk.findVaultByNameTimed(vaultName, nil)
+}
+
+func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (string, error) {
 	vaults, err := getVaults(vk.db, vk.accountID)
 	if err != nil {
 		return "", err
 	}
+	if t != nil {
+		t.mark(fmt.Sprintf("    getVaults (%d vaults)", len(vaults)))
+	}
 
-	for _, v := range vaults {
+	for i, v := range vaults {
 		displayName, rawName, err := vk.decryptVaultName(&v)
 		if err != nil {
 			continue
 		}
 
 		if strings.EqualFold(displayName, vaultName) || strings.EqualFold(rawName, vaultName) || v.VaultUUID == vaultName {
+			if t != nil {
+				t.mark(fmt.Sprintf("    decrypt %d vault names", i+1))
+			}
 			return v.VaultUUID, nil
 		}
 	}
@@ -809,14 +819,24 @@ func (vk *VaultKeychain) findVaultByName(vaultName string) (string, error) {
 
 // findItemByName finds an item in a vault by title or UUID.
 func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*ItemOverview, error) {
+	return vk.findItemByNameTimed(vaultUUID, itemName, nil)
+}
+
+func (vk *VaultKeychain) findItemByNameTimed(vaultUUID, itemName string, t *timer) (*ItemOverview, error) {
 	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark("    getVaultIDByUUID")
 	}
 
 	items, err := getItemOverviews(vk.db, vaultID)
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark(fmt.Sprintf("    getItemOverviews (%d items)", len(items)))
 	}
 
 	for i := range items {
@@ -826,6 +846,9 @@ func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*ItemOvervi
 		}
 
 		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
+			if t != nil {
+				t.mark(fmt.Sprintf("    decrypt %d item overviews", i+1))
+			}
 			return &items[i], nil
 		}
 	}
@@ -943,13 +966,13 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 	defer vk.Close()
 
-	vaultUUID, err := vk.findVaultByName(vaultName)
+	vaultUUID, err := vk.findVaultByNameTimed(vaultName, t)
 	if err != nil {
 		return err
 	}
 	t.mark("find vault")
 
-	item, err := vk.findItemByName(vaultUUID, itemName)
+	item, err := vk.findItemByNameTimed(vaultUUID, itemName, t)
 	if err != nil {
 		return err
 	}
