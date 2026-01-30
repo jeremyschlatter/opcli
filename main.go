@@ -488,7 +488,7 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 	return newVaultKeychainTimed(password, secretKey, email, accountUUID, accountID, accountType, nil)
 }
 
-func newVaultKeychainTimed(password, secretKey, email, _ string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
+func newVaultKeychainTimed(password, secretKey, email, accountUUID string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
 	db, err := openDB()
 	if err != nil {
 		return nil, err
@@ -525,7 +525,7 @@ func newVaultKeychainTimed(password, secretKey, email, _ string, accountID int64
 	// Try to use cached symmetric key (avoids expensive PBKDF2)
 	// Cache key includes salt so it invalidates if credentials change
 	cacheKey := keyset.KeysetUUID + "-" + encSymKey.P2s
-	if cached, err := GetCachedSymKey(cacheKey); err == nil {
+	if cached, err := GetCachedSymKey(accountUUID, cacheKey); err == nil {
 		vk.primarySymKey = cached
 		if t != nil {
 			t.mark("  symmetric key (cached)")
@@ -547,7 +547,7 @@ func newVaultKeychainTimed(password, secretKey, email, _ string, accountID int64
 		}
 
 		// Cache for next time (ignore errors - caching is best-effort)
-		SetCachedSymKey(cacheKey, vk.primarySymKey)
+		SetCachedSymKey(accountUUID, cacheKey, vk.primarySymKey)
 	}
 	vk.keysetSymKeys[keyset.KeysetUUID] = vk.primarySymKey
 

@@ -175,8 +175,6 @@ import (
 var keychainService = "opcli"
 
 const keychainCredentials = "credentials"
-const keychainSymKeyPrefix = "symkey-" // cached derived symmetric key
-
 // CredentialStore holds all account credentials in a single keychain entry.
 type CredentialStore struct {
 	Accounts map[string]*StoredAccount `json:"accounts"` // keyed by account UUID
@@ -190,6 +188,10 @@ type StoredAccount struct {
 	Shorthand string `json:"shorthand"`
 	Email     string `json:"email"`
 	URL       string `json:"url"` // sign-in URL
+
+	// Cached derived symmetric key (avoids PBKDF2 on each run)
+	SymKeyCacheKey string `json:"symkey_cache_key,omitempty"` // keyset UUID + salt for invalidation
+	SymKey         string `json:"symkey,omitempty"`           // base64-encoded symmetric key
 }
 
 // keychainSet stores a value in the keychain (no biometric)
@@ -257,20 +259,33 @@ func keychainDelete(account string) error {
 	return nil
 }
 
-// GetCachedSymKey retrieves a cached derived symmetric key from keychain.
-// The cacheKey should include account UUID and salt hash for invalidation.
-func GetCachedSymKey(cacheKey string) ([]byte, error) {
-	data, err := keychainGet(keychainSymKeyPrefix + cacheKey)
+// GetCachedSymKey retrieves a cached derived symmetric key.
+// Returns the key if cacheKey matches the stored cache key, otherwise error.
+func GetCachedSymKey(accountUUID, cacheKey string) ([]byte, error) {
+	store, err := loadCredentialStore()
 	if err != nil {
 		return nil, err
 	}
-	return base64.StdEncoding.DecodeString(data)
+	acct, ok := store.Accounts[accountUUID]
+	if !ok || acct.SymKeyCacheKey != cacheKey || acct.SymKey == "" {
+		return nil, fmt.Errorf("cache miss")
+	}
+	return base64.StdEncoding.DecodeString(acct.SymKey)
 }
 
-// SetCachedSymKey stores a derived symmetric key in the keychain.
-func SetCachedSymKey(cacheKey string, key []byte) error {
-	encoded := base64.StdEncoding.EncodeToString(key)
-	return keychainSet(keychainSymKeyPrefix+cacheKey, encoded)
+// SetCachedSymKey stores a derived symmetric key in the credential store.
+func SetCachedSymKey(accountUUID, cacheKey string, key []byte) error {
+	store, err := loadCredentialStore()
+	if err != nil {
+		return err
+	}
+	acct, ok := store.Accounts[accountUUID]
+	if !ok {
+		return fmt.Errorf("account not found")
+	}
+	acct.SymKeyCacheKey = cacheKey
+	acct.SymKey = base64.StdEncoding.EncodeToString(key)
+	return saveCredentialStore(store)
 }
 
 // cachedCredentialStore caches the credential store for the lifetime of the process
