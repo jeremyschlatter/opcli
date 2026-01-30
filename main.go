@@ -879,7 +879,24 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 }
 
 func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error) {
-	// First try to resolve from stored credentials
+	// Start DB query in background (pays cold-start cost in parallel with keychain)
+	type dbResult struct {
+		accounts []AccountInfo
+		err      error
+	}
+	dbCh := make(chan dbResult, 1)
+	go func() {
+		db, err := openDB()
+		if err != nil {
+			dbCh <- dbResult{err: err}
+			return
+		}
+		accounts, err := getAccounts(db)
+		db.Close()
+		dbCh <- dbResult{accounts: accounts, err: err}
+	}()
+
+	// Meanwhile, do keychain operations (pays keychain cold-start cost)
 	accountUUID, err := resolveAccountUUID(accountFlag)
 	if err != nil {
 		return nil, err
@@ -888,7 +905,6 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		t.mark("resolve account")
 	}
 
-	// Get stored account info
 	store, err := GetStoredAccounts()
 	if err != nil {
 		return nil, err
@@ -901,7 +917,6 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		t.mark("get stored accounts")
 	}
 
-	// Get credentials (with session/biometric)
 	password, secretKey, err := getCredentials(accountUUID)
 	if err != nil {
 		return nil, err
@@ -910,26 +925,18 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		t.mark("get credentials (session check)")
 	}
 
-	// Open database and get account info
-	db, err := openDB()
-	if err != nil {
-		return nil, err
+	// Wait for DB result
+	dbRes := <-dbCh
+	if dbRes.err != nil {
+		return nil, dbRes.err
 	}
 	if t != nil {
-		t.mark("  open DB")
-	}
-	accounts, err := getAccounts(db)
-	db.Close()
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		t.mark("  get accounts")
+		t.mark("get accounts (parallel)")
 	}
 
 	var accountID int64
 	var accountType string
-	for _, a := range accounts {
+	for _, a := range dbRes.accounts {
 		if a.AccountUUID == accountUUID {
 			accountID = a.ID
 			accountType = a.AccountType
