@@ -16,9 +16,57 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
+
+// Timing instrumentation (enabled via OPCLI_TIMING=1)
+var timingEnabled = os.Getenv("OPCLI_TIMING") != ""
+
+type timer struct {
+	start  time.Time
+	last   time.Time
+	events []timerEvent
+}
+
+type timerEvent struct {
+	name     string
+	elapsed  time.Duration
+	sinceLast time.Duration
+}
+
+func newTimer() *timer {
+	now := time.Now()
+	return &timer{start: now, last: now}
+}
+
+func (t *timer) mark(name string) {
+	if !timingEnabled {
+		return
+	}
+	now := time.Now()
+	t.events = append(t.events, timerEvent{
+		name:      name,
+		elapsed:   now.Sub(t.start),
+		sinceLast: now.Sub(t.last),
+	})
+	t.last = now
+}
+
+func (t *timer) print() {
+	if !timingEnabled || len(t.events) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "\n[Timing breakdown]")
+	for _, e := range t.events {
+		fmt.Fprintf(os.Stderr, "  %6.1fms (+%5.1fms)  %s\n",
+			float64(e.elapsed.Microseconds())/1000,
+			float64(e.sinceLast.Microseconds())/1000,
+			e.name)
+	}
+	fmt.Fprintf(os.Stderr, "  %6.1fms total\n", float64(t.events[len(t.events)-1].elapsed.Microseconds())/1000)
+}
 
 // testCommands is populated by test_helpers.go in test builds
 var testCommands map[string]func() error
@@ -434,9 +482,16 @@ type VaultKeychain struct {
 
 
 func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
+	return newVaultKeychainTimed(password, secretKey, email, accountUUID, accountID, accountType, nil)
+}
+
+func newVaultKeychainTimed(password, secretKey, email, _ string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
 	db, err := openDB()
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark("  open DB (keychain)")
 	}
 
 	vk := &VaultKeychain{
@@ -454,6 +509,9 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 		return nil, fmt.Errorf("failed to get primary keyset: %w", err)
 	}
 	vk.primaryKeysetID = keyset.KeysetUUID
+	if t != nil {
+		t.mark("  get primary keyset (DB)")
+	}
 
 	// Parse the encrypted symmetric key
 	var encSymKey EncryptedData
@@ -461,10 +519,13 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 		return nil, fmt.Errorf("failed to parse encrypted symmetric key: %w", err)
 	}
 
-	// Decrypt the symmetric key using 2SKD
+	// Decrypt the symmetric key using 2SKD (PBKDF2 - this is expensive!)
 	decryptedSymKeyJSON, err := decryptPBES2(&encSymKey, secretKey, password, email)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+	}
+	if t != nil {
+		t.mark("  PBKDF2 key derivation")
 	}
 
 	// Extract the actual key bytes from the JWK
@@ -490,6 +551,9 @@ func newVaultKeychain(password, secretKey, email, accountUUID string, accountID 
 		return nil, fmt.Errorf("failed to parse RSA private key: %w", err)
 	}
 	vk.keysetRSAKeys[keyset.KeysetUUID] = primaryRSA
+	if t != nil {
+		t.mark("  decrypt RSA key")
+	}
 
 	return vk, nil
 }
@@ -788,10 +852,17 @@ func parseOPURI(uri string) (vault, item, section, field string, err error) {
 
 // openVaultKeychain is a helper to resolve account, get credentials, and open keychain.
 func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
+	return openVaultKeychainTimed(accountFlag, nil)
+}
+
+func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error) {
 	// First try to resolve from stored credentials
 	accountUUID, err := resolveAccountUUID(accountFlag)
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark("resolve account")
 	}
 
 	// Get stored account info
@@ -803,11 +874,17 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 	if !ok {
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
 	}
+	if t != nil {
+		t.mark("get stored accounts")
+	}
 
 	// Get credentials (with session/biometric)
 	password, secretKey, err := getCredentials(accountUUID)
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark("get credentials (session check)")
 	}
 
 	// Open database and get account info
@@ -815,10 +892,16 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 	if err != nil {
 		return nil, err
 	}
+	if t != nil {
+		t.mark("  open DB")
+	}
 	accounts, err := getAccounts(db)
 	db.Close()
 	if err != nil {
 		return nil, err
+	}
+	if t != nil {
+		t.mark("  get accounts")
 	}
 
 	var accountID int64
@@ -835,16 +918,26 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 	}
 
 	// Initialize keychain
-	return newVaultKeychain(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType)
+	vk, err := newVaultKeychainTimed(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType, t)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		t.mark("init keychain (key derivation)")
+	}
+	return vk, nil
 }
 
 func cmdRead(uri string, accountFlag string) error {
+	t := newTimer()
+
 	vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return err
 	}
+	t.mark("parse URI")
 
-	vk, err := openVaultKeychain(accountFlag)
+	vk, err := openVaultKeychainTimed(accountFlag, t)
 	if err != nil {
 		return err
 	}
@@ -854,28 +947,34 @@ func cmdRead(uri string, accountFlag string) error {
 	if err != nil {
 		return err
 	}
+	t.mark("find vault")
 
 	item, err := vk.findItemByName(vaultUUID, itemName)
 	if err != nil {
 		return err
 	}
+	t.mark("find item")
 
 	detail, err := getItemDetail(vk.db, item.ID)
 	if err != nil {
 		return err
 	}
+	t.mark("get item detail (DB)")
 
 	decryptedItem, err := vk.decryptDetail(vaultUUID, &detail.EncDetails)
 	if err != nil {
 		return err
 	}
+	t.mark("decrypt item")
 
 	value, err := findField(decryptedItem, sectionName, fieldName)
 	if err != nil {
 		return err
 	}
+	t.mark("find field")
 
 	fmt.Println(value)
+	t.print()
 	return nil
 }
 
