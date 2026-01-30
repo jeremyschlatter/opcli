@@ -4,11 +4,18 @@ A fast, local 1Password CLI alternative. Reads directly from 1Password's local S
 
 ## Performance
 
-~23x faster than the official `op` CLI:
+~10x faster than the official `op` CLI:
 
 ```
-opcli read: 47.8ms (mean)
-op read:    1121ms (mean)
+❯ hyperfine 'opcli read "op://Private/example/example"'
+Benchmark 1: opcli read "op://Private/example/example"
+  Time (mean ± σ):      90.9 ms ±   3.2 ms    [User: 34.6 ms, System: 9.2 ms]
+  Range (min … max):    83.6 ms …  96.0 ms    34 runs
+
+❯ hyperfine 'op read "op://Private/example/example"'
+Benchmark 1: op read "op://Private/example/example"
+  Time (mean ± σ):     979.6 ms ±  21.1 ms    [User: 159.4 ms, System: 53.0 ms]
+  Range (min … max):   937.1 ms … 1016.9 ms    10 runs
 ```
 
 ## How it works
