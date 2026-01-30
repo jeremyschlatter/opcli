@@ -519,19 +519,32 @@ func newVaultKeychainTimed(password, secretKey, email, _ string, accountID int64
 		return nil, fmt.Errorf("failed to parse encrypted symmetric key: %w", err)
 	}
 
-	// Decrypt the symmetric key using 2SKD (PBKDF2 - this is expensive!)
-	decryptedSymKeyJSON, err := decryptPBES2(&encSymKey, secretKey, password, email)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
-	}
-	if t != nil {
-		t.mark("  PBKDF2 key derivation")
-	}
+	// Try to use cached symmetric key (avoids expensive PBKDF2)
+	// Cache key includes salt so it invalidates if credentials change
+	cacheKey := keyset.KeysetUUID + "-" + encSymKey.P2s
+	if cached, err := GetCachedSymKey(cacheKey); err == nil {
+		vk.primarySymKey = cached
+		if t != nil {
+			t.mark("  symmetric key (cached)")
+		}
+	} else {
+		// Decrypt the symmetric key using 2SKD (PBKDF2 - expensive!)
+		decryptedSymKeyJSON, err := decryptPBES2(&encSymKey, secretKey, password, email)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
+		}
+		if t != nil {
+			t.mark("  PBKDF2 key derivation")
+		}
 
-	// Extract the actual key bytes from the JWK
-	vk.primarySymKey, err = extractSymmetricKey(decryptedSymKeyJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract symmetric key: %w", err)
+		// Extract the actual key bytes from the JWK
+		vk.primarySymKey, err = extractSymmetricKey(decryptedSymKeyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract symmetric key: %w", err)
+		}
+
+		// Cache for next time (ignore errors - caching is best-effort)
+		SetCachedSymKey(cacheKey, vk.primarySymKey)
 	}
 	vk.keysetSymKeys[keyset.KeysetUUID] = vk.primarySymKey
 

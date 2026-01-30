@@ -162,6 +162,7 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -174,6 +175,7 @@ import (
 var keychainService = "opcli"
 
 const keychainCredentials = "credentials"
+const keychainSymKeyPrefix = "symkey-" // cached derived symmetric key
 
 // CredentialStore holds all account credentials in a single keychain entry.
 type CredentialStore struct {
@@ -253,6 +255,22 @@ func keychainDelete(account string) error {
 		return fmt.Errorf("keychain error: OSStatus %d", status)
 	}
 	return nil
+}
+
+// GetCachedSymKey retrieves a cached derived symmetric key from keychain.
+// The cacheKey should include account UUID and salt hash for invalidation.
+func GetCachedSymKey(cacheKey string) ([]byte, error) {
+	data, err := keychainGet(keychainSymKeyPrefix + cacheKey)
+	if err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(data)
+}
+
+// SetCachedSymKey stores a derived symmetric key in the keychain.
+func SetCachedSymKey(cacheKey string, key []byte) error {
+	encoded := base64.StdEncoding.EncodeToString(key)
+	return keychainSet(keychainSymKeyPrefix+cacheKey, encoded)
 }
 
 // loadCredentialStore loads the credential store from keychain.
