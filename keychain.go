@@ -273,14 +273,23 @@ func SetCachedSymKey(cacheKey string, key []byte) error {
 	return keychainSet(keychainSymKeyPrefix+cacheKey, encoded)
 }
 
+// cachedCredentialStore caches the credential store for the lifetime of the process
+var cachedCredentialStore *CredentialStore
+
 // loadCredentialStore loads the credential store from keychain.
 // Returns an empty store if no credentials exist yet.
+// Results are cached for the lifetime of the process.
 func loadCredentialStore() (*CredentialStore, error) {
+	if cachedCredentialStore != nil {
+		return cachedCredentialStore, nil
+	}
+
 	data, err := keychainGet(keychainCredentials)
 	if err != nil {
 		// Not found is expected for fresh installs
 		if strings.Contains(err.Error(), "not found") {
-			return &CredentialStore{Accounts: make(map[string]*StoredAccount)}, nil
+			cachedCredentialStore = &CredentialStore{Accounts: make(map[string]*StoredAccount)}
+			return cachedCredentialStore, nil
 		}
 		return nil, err
 	}
@@ -293,7 +302,8 @@ func loadCredentialStore() (*CredentialStore, error) {
 	if store.Accounts == nil {
 		store.Accounts = make(map[string]*StoredAccount)
 	}
-	return &store, nil
+	cachedCredentialStore = &store
+	return cachedCredentialStore, nil
 }
 
 // saveCredentialStore saves the credential store to keychain.
@@ -302,7 +312,11 @@ func saveCredentialStore(store *CredentialStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
-	return keychainSet(keychainCredentials, string(data))
+	if err := keychainSet(keychainCredentials, string(data)); err != nil {
+		return err
+	}
+	cachedCredentialStore = store // update cache
+	return nil
 }
 
 // StoreCredentials stores credentials for an account.
