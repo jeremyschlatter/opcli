@@ -22,9 +22,7 @@ No network calls. No IPC with the desktop app. Just direct crypto.
 
 ## Installation
 
-```bash
-go install github.com/jeremyschlatter/opcli@latest
-```
+Download the [latest release](https://github.com/jeremyschlatter/opcli/releases/latest) from GitHub.
 
 Or build from source:
 
@@ -38,6 +36,8 @@ The build requires Xcode Command Line Tools and Go 1.21+.
 ### Code Signing (required for Touch ID)
 
 For Touch ID support, the binary must be signed with a Developer ID certificate.
+
+The release binary is signed with my certificate. To build from source you will need your own.
 
 ## Usage
 
