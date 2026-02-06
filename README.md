@@ -79,7 +79,7 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 ## Requirements
 
-- macOS (reads from `~/Library/Group Containers/2BUA8C4S2C.com.1password/`)
+- macOS
 - 1Password 8 desktop app installed (creates the local database)
 - Your 1Password Secret Key (from your Emergency Kit)
 
