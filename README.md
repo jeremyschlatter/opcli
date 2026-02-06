@@ -90,7 +90,7 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 ## Why Not Desktop App Integration?
 
-The official `op` CLI can avoid password prompts by integrating with the 1Password desktop app (Touch ID).
+The official `op` CLI can avoid password prompts by integrating with the 1Password desktop app.
 
 Unfortunately for us, but fortunately for 1Password security in general, the desktop app requires a code signature from Agile Bits before accepting a connection from the CLI. If `opcli` does extremely well, maybe we can get Agile Bits to adopt it some day. Until then, we're stuck with managing the master password ourselves.
 
