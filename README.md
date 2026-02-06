@@ -10,10 +10,11 @@ A fast, local 1Password CLI alternative. Reads directly from 1Password's local S
 
 ## How it works
 
-1. Reads the local 1Password SQLite database
-2. Derives the Account Unlock Key using 2SKD (HKDF + PBKDF2)
-3. Decrypts the keyset chain (AES-256-GCM + RSA-OAEP)
-4. Decrypts vault keys and item data
+1. Gets your Secret Key and Master Password from you, saves them in Keychain
+2. Reads the local 1Password SQLite database
+3. Derives the Account Unlock Key using 2SKD (HKDF + PBKDF2)
+4. Decrypts the keyset chain (AES-256-GCM + RSA-OAEP)
+5. Decrypts vault keys and item data
 
 No network calls. No IPC with the desktop app. Just direct crypto.
 
