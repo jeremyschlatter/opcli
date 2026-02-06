@@ -62,7 +62,7 @@ opcli signout
 
 We unfortunately cannot integrate with the 1Password Desktop App for account unlocking, so `opcli signin` will require you to enter both your 1Password Secret Key (from your Emergency Kit) and your Master Password.
 
-These credentials are stored in the macOS Keychain with an app-only ACL. After this, `opcli` will only use TouchID to authenticate you. If any other app tries to read these credentials from the Keychain, macOS will give you a Keychain password prompt:
+These credentials are stored in the macOS Keychain with an app-only ACL. After this, `opcli` will always use TouchID to authenticate you. If any other app tries to read these credentials from the Keychain, macOS will give you a Keychain password prompt:
 
 > `app` wants to use your confidential information stored in "opcli credentials" in your keychain.
 
