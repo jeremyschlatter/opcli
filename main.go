@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"syscall"
 	"sort"
 	"strconv"
 	"strings"
@@ -203,7 +204,7 @@ func printUsage() {
 	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
 	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
 	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
-	fmt.Println("  opcli run [--env-file=<file>]... -- <command>")
+	fmt.Println("  opcli run [--env-file=<file>]... [--tui] -- <command>")
 	fmt.Println("                                       - Run command with secrets as env vars")
 	fmt.Println("  opcli account list                   - List all accounts")
 	fmt.Println("  opcli account forget [<acct>]        - Remove an account")
@@ -1347,7 +1348,7 @@ func cmdInject(args []string, accountFlag string) error {
 
 func cmdRun(args []string, accountFlag string) (int, error) {
 	var envFiles []string
-	var noMasking bool
+	var noMasking, tui bool
 	var cmdArgs []string
 
 	// Parse flags until we hit --
@@ -1368,6 +1369,8 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			envFiles = append(envFiles, strings.TrimPrefix(arg, "--env-file="))
 		} else if arg == "--no-masking" {
 			noMasking = true
+		} else if arg == "--tui" {
+			tui = true
 		} else if strings.HasPrefix(arg, "-") {
 			return 0, fmt.Errorf("unknown flag: %s", arg)
 		}
@@ -1400,7 +1403,6 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	// Find op:// references and collect secrets to resolve
 	secretRefs := make(map[string]string) // env var name -> op:// URI
 	for k, v := range env {
-		// Expand variables in the value
 		expanded := os.Expand(v, func(name string) string {
 			if val, ok := env[name]; ok {
 				return val
@@ -1415,23 +1417,23 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	}
 
 	// Resolve secrets if any
-	var secrets map[string]string
+	var secretValues []string
 	if len(secretRefs) > 0 {
 		vk, err := openVaultKeychain(accountFlag)
 		if err != nil {
 			return 0, err
 		}
-		defer vk.Close()
 
-		secrets = make(map[string]string)
 		for name, uri := range secretRefs {
 			value, err := readSecret(vk, uri)
 			if err != nil {
+				vk.Close()
 				return 0, fmt.Errorf("failed to resolve %s: %w", name, err)
 			}
-			secrets[uri] = value
+			secretValues = append(secretValues, value)
 			env[name] = value
 		}
+		vk.Close()
 	}
 
 	// Build final environment slice
@@ -1440,43 +1442,37 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		finalEnv = append(finalEnv, k+"="+v)
 	}
 
-	// Run the command
+	if tui {
+		// Exec into the command (replaces this process, so TUIs work)
+		binary, err := exec.LookPath(cmdArgs[0])
+		if err != nil {
+			return 0, err
+		}
+		return 0, syscall.Exec(binary, cmdArgs, finalEnv)
+	}
+
+	// Fork+exec with secret masking
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = finalEnv
+	cmd.Stdin = os.Stdin
 
-	var stdoutMask, stderrMask *maskingWriter
-	if noMasking || len(secrets) == 0 {
+	if noMasking || len(secretValues) == 0 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
-		// Collect unique secret values for masking
-		secretValues := make([]string, 0, len(secrets))
-		for _, v := range secrets {
-			secretValues = append(secretValues, v)
-		}
-		stdoutMask = newMaskingWriter(os.Stdout, secretValues)
-		stderrMask = newMaskingWriter(os.Stderr, secretValues)
+		stdoutMask := newMaskingWriter(os.Stdout, secretValues)
+		stderrMask := newMaskingWriter(os.Stderr, secretValues)
 		cmd.Stdout = stdoutMask
 		cmd.Stderr = stderrMask
+		defer stdoutMask.Close()
+		defer stderrMask.Close()
 	}
 
-	cmd.Stdin = os.Stdin
-
-	runErr := cmd.Run()
-
-	// Flush masking writers
-	if stdoutMask != nil {
-		stdoutMask.Close()
-	}
-	if stderrMask != nil {
-		stderrMask.Close()
-	}
-
-	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode(), nil
 		}
-		return 0, runErr
+		return 0, err
 	}
 	return 0, nil
 }
@@ -1531,7 +1527,6 @@ type maskingWriter struct {
 }
 
 func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
-	// Build replacer pairs: secret1, <concealed>, secret2, <concealed>, ...
 	var pairs []string
 	maxLen := 0
 	for _, s := range secrets {
@@ -1550,18 +1545,14 @@ func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
 }
 
 func (m *maskingWriter) Write(p []byte) (n int, err error) {
-	// If no secrets to mask, write everything
 	if m.maxSecretLen == 0 {
 		return m.w.Write(p)
 	}
 
 	m.buf = append(m.buf, p...)
-
-	// Replace all complete secrets in the buffer
 	m.buf = []byte(m.replacer.Replace(string(m.buf)))
 
 	// Keep the last maxSecretLen-1 bytes (could be start of a secret)
-	// Everything before that is safe to write
 	safeLen := len(m.buf) - m.maxSecretLen + 1
 	if safeLen <= 0 {
 		return len(p), nil
@@ -1585,7 +1576,7 @@ func (m *maskingWriter) Close() error {
 }
 
 func printRunUsage() {
-	fmt.Fprintln(os.Stderr, "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>...")
+	fmt.Fprintln(os.Stderr, "Usage: opcli run [--env-file=<file>]... [--tui] [--no-masking] -- <command>...")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Run a command with secrets loaded as environment variables.")
 	fmt.Fprintln(os.Stderr, "")
@@ -1594,6 +1585,7 @@ func printRunUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Flags:")
 	fmt.Fprintln(os.Stderr, "  --env-file <file>  Load environment from a dotenv file (can be repeated)")
+	fmt.Fprintln(os.Stderr, "  --tui              Exec into the command (for TUI apps like claude)")
 	fmt.Fprintln(os.Stderr, "  --no-masking       Show secrets in command output (don't mask)")
 	fmt.Fprintln(os.Stderr, "  -h, --help         Show this help message")
 	fmt.Fprintln(os.Stderr, "")
