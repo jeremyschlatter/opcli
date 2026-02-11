@@ -30,16 +30,13 @@ type SignInProvider struct {
 	EncUnlockKey EncryptedData `json:"enc_unlock_key"`
 }
 
-// Keyset represents a keyset from account_objects
+// Keyset represents a keyset from objects_associated (type 36)
 type Keyset struct {
-	KeysetUUID   string `json:"keyset_uuid"`
-	SN           int    `json:"sn"`
-	PubKey       string `json:"pub_key"`       // JSON-encoded RSA public key
-	EncPriKey    string `json:"enc_pri_key"`   // JSON-encoded EncryptedData
-	EncSymKey    string `json:"enc_sym_key"`   // JSON-encoded EncryptedData
-	EncSignKey   string `json:"enc_sign_key"`
-	PubSignKey   string `json:"pub_sign_key"`
-	EncryptedBy  string `json:"encrypted_by"` // "mp" for master password, or keyset UUID
+	KeysetUUID  string        // populated from key_name column, not from JSON
+	SN          int           `json:"sn"`
+	EncPriKey   EncryptedData `json:"encPriKey"`
+	EncSymKey   EncryptedData `json:"encSymKey"`
+	EncryptedBy string        `json:"encryptedBy"` // "mp" for master password, or keyset UUID
 }
 
 // Vault represents a vault from account_objects

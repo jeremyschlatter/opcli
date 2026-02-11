@@ -132,15 +132,16 @@ func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
 
 // getPrimaryKeyset retrieves the primary keyset (encrypted by master password) for an account.
 func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
+	var keyName string
 	var data []byte
 	t0 := time.Now()
 	err := db.QueryRow(`
-		SELECT data FROM account_objects
-		WHERE account_id = ?
-		AND object_type = 'keyset'
-		AND json_extract(data, '$.encrypted_by') = 'mp'
+		SELECT key_name, data FROM objects_associated
+		WHERE associated_account = ?
+		AND type = 36
+		AND json_extract(data, '$.encryptedBy') = 'mp'
 		LIMIT 1
-	`, accountID).Scan(&data)
+	`, accountID).Scan(&keyName, &data)
 	logQueryTime("getPrimaryKeyset", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query primary keyset: %w", err)
@@ -150,6 +151,7 @@ func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 	if err := json.Unmarshal(data, &keyset); err != nil {
 		return nil, fmt.Errorf("failed to parse keyset data: %w", err)
 	}
+	keyset.KeysetUUID = keyName
 
 	return &keyset, nil
 }
@@ -159,8 +161,8 @@ func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 	var data []byte
 	t0 := time.Now()
 	err := db.QueryRow(`
-		SELECT data FROM account_objects
-		WHERE account_id = ? AND object_type = 'keyset' AND uuid = ?
+		SELECT data FROM objects_associated
+		WHERE associated_account = ? AND type = 36 AND key_name = ?
 	`, accountID, uuid).Scan(&data)
 	logQueryTime("getKeyset", t0)
 	if err != nil {
@@ -171,6 +173,7 @@ func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 	if err := json.Unmarshal(data, &keyset); err != nil {
 		return nil, fmt.Errorf("failed to parse keyset data: %w", err)
 	}
+	keyset.KeysetUUID = uuid
 
 	return &keyset, nil
 }

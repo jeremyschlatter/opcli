@@ -516,15 +516,9 @@ func newVaultKeychainTimed(password, secretKey, email, accountUUID string, accou
 		t.mark("  get primary keyset (DB)")
 	}
 
-	// Parse the encrypted symmetric key
-	var encSymKey EncryptedData
-	if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
-		return nil, fmt.Errorf("failed to parse encrypted symmetric key: %w", err)
-	}
-
 	// Try to use cached symmetric key (avoids expensive PBKDF2)
 	// Cache key includes salt so it invalidates if credentials change
-	cacheKey := keyset.KeysetUUID + "-" + encSymKey.P2s
+	cacheKey := keyset.KeysetUUID + "-" + keyset.EncSymKey.P2s
 	if cached, err := GetCachedSymKey(accountUUID, cacheKey); err == nil {
 		vk.primarySymKey = cached
 		if t != nil {
@@ -532,7 +526,7 @@ func newVaultKeychainTimed(password, secretKey, email, accountUUID string, accou
 		}
 	} else {
 		// Decrypt the symmetric key using 2SKD (PBKDF2 - expensive!)
-		decryptedSymKeyJSON, err := decryptPBES2(&encSymKey, secretKey, password, email)
+		decryptedSymKeyJSON, err := decryptPBES2(&keyset.EncSymKey, secretKey, password, email)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt symmetric key: %w", err)
 		}
@@ -552,12 +546,7 @@ func newVaultKeychainTimed(password, secretKey, email, accountUUID string, accou
 	vk.keysetSymKeys[keyset.KeysetUUID] = vk.primarySymKey
 
 	// Decrypt the RSA private key
-	var encPriKey EncryptedData
-	if err := json.Unmarshal([]byte(keyset.EncPriKey), &encPriKey); err != nil {
-		return nil, fmt.Errorf("failed to parse encrypted private key: %w", err)
-	}
-
-	decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, vk.primarySymKey)
+	decryptedPriKeyJSON, err := decryptEncryptedData(&keyset.EncPriKey, vk.primarySymKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt private key: %w", err)
 	}
@@ -609,12 +598,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	}
 
 	// Decrypt sym key using primary RSA (no lock needed for decryption)
-	var encSymKey EncryptedData
-	if err := json.Unmarshal([]byte(keyset.EncSymKey), &encSymKey); err != nil {
-		return nil, fmt.Errorf("failed to parse keyset sym key: %w", err)
-	}
-
-	symKeyData, err := base64URLDecode(encSymKey.Data)
+	symKeyData, err := base64URLDecode(keyset.EncSymKey.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode keyset sym key: %w", err)
 	}
@@ -630,12 +614,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	}
 
 	// Decrypt the RSA private key
-	var encPriKey EncryptedData
-	if err := json.Unmarshal([]byte(keyset.EncPriKey), &encPriKey); err != nil {
-		return nil, fmt.Errorf("failed to parse keyset private key: %w", err)
-	}
-
-	decryptedPriKeyJSON, err := decryptEncryptedData(&encPriKey, symKey)
+	decryptedPriKeyJSON, err := decryptEncryptedData(&keyset.EncPriKey, symKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt keyset private key: %w", err)
 	}
