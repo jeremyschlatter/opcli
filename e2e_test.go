@@ -51,6 +51,8 @@ type testEnv struct {
 func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
+	os.Setenv(autoBackupDB, "")
+
 	// Build the test binary (cached across test runs)
 	binPath, err := buildTestBinary()
 	if err != nil {
