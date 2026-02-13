@@ -13,11 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"syscall"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -33,8 +33,8 @@ type timer struct {
 }
 
 type timerEvent struct {
-	name     string
-	elapsed  time.Duration
+	name      string
+	elapsed   time.Duration
 	sinceLast time.Duration
 }
 
@@ -185,6 +185,11 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(code)
+	case "versioned-backup-poll":
+		if err := cmdVersionedBackupPoll(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("opcli %s\n", Version)
 	default:
@@ -291,6 +296,15 @@ func selectDBAccount(db *sql.DB, accountFlag string) (*AccountInfo, error) {
 	}
 
 	return nil, fmt.Errorf("account not found: %s", accountFlag)
+}
+
+func cmdVersionedBackupPoll() error {
+	os.Setenv(autoBackupDB, required)
+	db, err := openDB()
+	if err == nil {
+		db.Close()
+	}
+	return err
 }
 
 func cmdAccountList() error {
@@ -483,7 +497,6 @@ type VaultKeychain struct {
 	vaultKeys       map[string][]byte          // vault UUID -> symmetric key
 	vaultKeysMu     sync.RWMutex               // protects vaultKeys for concurrent access
 }
-
 
 func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
 	return newVaultKeychainTimed(password, secretKey, email, accountUUID, accountID, accountType, nil)

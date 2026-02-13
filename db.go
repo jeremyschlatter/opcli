@@ -44,20 +44,76 @@ func getDBPath() (string, error) {
 	return dbPath, nil
 }
 
-// openDB opens the 1Password database in read-only mode
+const (
+	autoBackupDB = "OPCLI_AUTO_BACKUP_1PASSWORD_DB"
+	required     = "required"
+)
+
+// openDB opens the 1Password database in read-only mode, optionally
+// creating a versioned backup if OPCLI_AUTO_BACKUP_1PASSWORD_DB is set.
 func openDB() (*sql.DB, error) {
 	dbPath, err := getDBPath()
 	if err != nil {
 		return nil, err
 	}
 
-	// Open in read-only mode with WAL support
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	if v := os.Getenv(autoBackupDB); v != "" {
+		if err := maybeBackupDB(db); err != nil {
+			fmt.Fprintf(os.Stderr, "opcli: auto-backup of 1password db failed: %v\n", err)
+			if v == required {
+				db.Close()
+				return nil, err
+			}
+		}
+	}
+
 	return db, nil
+}
+
+// getDBVersion reads the schema version from the config table.
+func getDBVersion(db *sql.DB) (int, error) {
+	var version int
+	err := db.QueryRow("SELECT value FROM config WHERE name = 'version'").Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read db version: %w", err)
+	}
+	return version, nil
+}
+
+// maybeBackupDB checks if a versioned backup exists for the current schema version,
+// and creates one if not. Returns nil if a backup already existed.
+func maybeBackupDB(db *sql.DB) error {
+	version, err := getDBVersion(db)
+	if err != nil {
+		return err
+	}
+
+	dataDir, err := getDataDir()
+	if err != nil {
+		return err
+	}
+
+	backupDir := filepath.Join(dataDir, "versioned-db-backups")
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return err
+	}
+
+	// Check if a backup for this version already exists
+	matches, _ := filepath.Glob(filepath.Join(backupDir, fmt.Sprintf("v%d-*.sqlite3", version)))
+	if len(matches) > 0 {
+		return nil
+	}
+
+	date := time.Now().Format("2006-01-02")
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("v%d-%s.sqlite3", version, date))
+
+	_, err = db.Exec("VACUUM INTO ?", backupPath)
+	return err
 }
 
 // AccountInfo holds basic info for account selection.
@@ -295,4 +351,3 @@ func getItemDetail(db *sql.DB, itemID int64) (*ItemDetail, error) {
 
 	return &detail, nil
 }
-
