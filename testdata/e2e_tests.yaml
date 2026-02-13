@@ -296,5 +296,5 @@ run:
 
   - name: no command provided
     args: [run]
-    errPrefix: "Usage: opcli run [--env-file=<file>]... [--no-masking] -- <command>..."
+    errPrefix: "Usage: opcli run [--env-file=<file>]... [--tui] [--no-masking] -- <command>..."
     code: 1

@@ -214,20 +214,16 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 		return nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
 	}
 
-	encSymKeyJSON, _ := json.Marshal(encSymKey)
-	encPriKeyJSON, _ := json.Marshal(encPriKey)
-
 	keysetData := map[string]interface{}{
-		"keyset_uuid":  keysetUUID,
-		"sn":           1,
-		"encrypted_by": "mp",
-		"enc_sym_key":  string(encSymKeyJSON),
-		"enc_pri_key":  string(encPriKeyJSON),
+		"sn":          1,
+		"encryptedBy": "mp",
+		"encSymKey":   encSymKey,
+		"encPriKey":   encPriKey,
 	}
 	keysetJSON, _ := json.Marshal(keysetData)
 
-	_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'keyset', ?)`,
-		accountDBID, keysetUUID, keysetJSON)
+	_, err = db.Exec(`INSERT INTO objects_associated (key_name, type, data, associated_account) VALUES (?, 36, ?, ?)`,
+		keysetUUID, keysetJSON, accountDBID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert keyset: %w", err)
 	}
@@ -266,6 +262,13 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 
 func createSchema(db *sql.DB) error {
 	schema := `
+		CREATE TABLE config (
+			name TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+
+		INSERT INTO config (name, value) VALUES ('version', '60');
+
 		CREATE TABLE accounts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account_uuid TEXT NOT NULL UNIQUE,
@@ -279,6 +282,16 @@ func createSchema(db *sql.DB) error {
 			object_type TEXT NOT NULL,
 			data TEXT NOT NULL,
 			FOREIGN KEY (account_id) REFERENCES accounts(id)
+		);
+
+		CREATE TABLE objects_associated (
+			key_name TEXT NOT NULL,
+			type INT NOT NULL,
+			data BLOB NOT NULL,
+			associated_item INT,
+			associated_account INT NOT NULL,
+			PRIMARY KEY (key_name, type, associated_account),
+			FOREIGN KEY (associated_account) REFERENCES accounts (id) ON DELETE CASCADE
 		);
 
 		CREATE TABLE item_overviews (
