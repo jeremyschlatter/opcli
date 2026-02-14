@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"opcli/migrations"
 
 	"gopkg.in/yaml.v3"
 )
@@ -186,9 +189,47 @@ func loadTestCases(t *testing.T) map[string][]yamlTestCase {
 
 func TestE2E(t *testing.T) {
 	env := setupTestEnv(t)
-	defer env.cleanup(t)
+	t.Cleanup(func() { env.cleanup(t) })
 
 	allTests := loadTestCases(t)
+
+	t.Run("current", func(t *testing.T) {
+		runTestCases(t, env, allTests)
+	})
+
+	t.Run("migrated", func(t *testing.T) {
+		// Copy the DB and apply all down-migrations to get the oldest schema.
+		migratedPath := filepath.Join(env.tmpDir, "test-migrated.sqlite")
+		data, err := os.ReadFile(env.testDB.Path)
+		if err != nil {
+			t.Fatalf("failed to read test db: %v", err)
+		}
+		if err := os.WriteFile(migratedPath, data, 0600); err != nil {
+			t.Fatalf("failed to write migrated db: %v", err)
+		}
+		db, err := sql.Open("sqlite3", migratedPath)
+		if err != nil {
+			t.Fatalf("failed to open migrated db: %v", err)
+		}
+		for i := len(migrations.All) - 1; i >= 0; i-- {
+			if err := migrations.All[i].Down(db); err != nil {
+				db.Close()
+				t.Fatalf("down migration %q failed: %v", migrations.All[i].Name, err)
+			}
+		}
+		db.Close()
+
+		migratedDB := *env.testDB
+		migratedDB.Path = migratedPath
+		migratedEnv := *env
+		migratedEnv.testDB = &migratedDB
+
+		runTestCases(t, &migratedEnv, allTests)
+	})
+}
+
+func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase) {
+	t.Helper()
 	for command, tests := range allTests {
 		t.Run(command, func(t *testing.T) {
 			for _, tc := range tests {
@@ -253,7 +294,7 @@ func TestE2E(t *testing.T) {
 
 func TestE2E_Version(t *testing.T) {
 	env := setupTestEnv(t)
-	defer env.cleanup(t)
+	t.Cleanup(func() { env.cleanup(t) })
 
 	stdout, _, code := env.runCLI("", "", nil, "version")
 	if code != 0 {
