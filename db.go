@@ -117,6 +117,7 @@ func openDB() (*sql.DB, error) {
 // backupToMemory copies an open database to an in-memory database using
 // SQLite's backup API, then closes the source.
 func backupToMemory(src *sql.DB) (*sql.DB, error) {
+	defer src.Close()
 	dst, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		return nil, err
