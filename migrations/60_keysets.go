@@ -1,4 +1,4 @@
-package main
+package migrations
 
 import (
 	"database/sql"
@@ -6,31 +6,11 @@ import (
 	"fmt"
 )
 
-type migration struct {
-	name           string
-	needsMigration func(db *sql.DB) (bool, error)
-	migrate        func(db *sql.DB) error
-}
-
-// migrations is the list of migrations that transform older DB schemas
-// into the format the current code expects. They are applied in-memory
-// only; the original DB is never modified.
-var migrations = []migration{
-	{
-		name: "keysets: account_objects → objects_associated",
-		needsMigration: func(db *sql.DB) (bool, error) {
-			var count int
-			err := db.QueryRow(`SELECT count(*) FROM account_objects WHERE object_type = 'keyset'`).Scan(&count)
-			if err != nil {
-				return false, err
-			}
-			return count > 0, nil
-		},
-		migrate: migrateKeysetsUp,
-	},
-}
-
-// Old keyset JSON format (in account_objects):
+// keysets60 migrates keysets from the pre-v60 format (account_objects, snake_case,
+// JSON-string encoded EncryptedData) to the v60 format (objects_associated type 36,
+// camelCase, embedded EncryptedData objects).
+//
+// Old keyset JSON (in account_objects, object_type='keyset'):
 //
 //	{
 //	  "keyset_uuid": "...",
@@ -43,7 +23,7 @@ var migrations = []migration{
 //	  "pub_sign_key": "..."                                       // optional
 //	}
 //
-// New keyset JSON format (in objects_associated, type=36):
+// New keyset JSON (in objects_associated, type=36):
 //
 //	{
 //	  "sn": 1,
@@ -57,8 +37,32 @@ var migrations = []migration{
 //
 // UUID moves from JSON field "keyset_uuid" to the "key_name" column.
 // account_id → associated_account.
+var keysets60 = Migration{
+	Name: "60: keysets account_objects → objects_associated",
+	NeedsMigration: func(db *sql.DB) (bool, error) {
+		var count int
+		err := db.QueryRow(`SELECT count(*) FROM account_objects WHERE object_type = 'keyset'`).Scan(&count)
+		if err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	},
+	Up:   keysetsUp,
+	Down: keysetsDown,
+}
 
-func migrateKeysetsUp(db *sql.DB) error {
+// Field name mappings between old (snake_case) and new (camelCase) formats.
+// These are fields whose values are JSON-stringified in the old format and
+// embedded objects in the new format.
+var keysetFieldMap = map[string]string{
+	"enc_sym_key":  "encSymKey",
+	"enc_pri_key":  "encPriKey",
+	"pub_key":      "pubKey",
+	"enc_sign_key": "encSignKey",
+	"pub_sign_key": "pubSignKey",
+}
+
+func keysetsUp(db *sql.DB) error {
 	rows, err := db.Query(`SELECT account_id, uuid, data FROM account_objects WHERE object_type = 'keyset'`)
 	if err != nil {
 		return fmt.Errorf("query old keysets: %w", err)
@@ -88,22 +92,12 @@ func migrateKeysetsUp(db *sql.DB) error {
 			return fmt.Errorf("parse old keyset %s: %w", ks.uuid, err)
 		}
 
-		newData := make(map[string]json.RawMessage)
+		newData := map[string]json.RawMessage{
+			"sn":          old["sn"],
+			"encryptedBy": old["encrypted_by"],
+		}
 
-		// Copy sn as-is
-		newData["sn"] = old["sn"]
-
-		// Rename encrypted_by → encryptedBy
-		newData["encryptedBy"] = old["encrypted_by"]
-
-		// Convert JSON-string fields to embedded objects
-		for oldKey, newKey := range map[string]string{
-			"enc_sym_key":  "encSymKey",
-			"enc_pri_key":  "encPriKey",
-			"pub_key":      "pubKey",
-			"enc_sign_key": "encSignKey",
-			"pub_sign_key": "pubSignKey",
-		} {
+		for oldKey, newKey := range keysetFieldMap {
 			raw, ok := old[oldKey]
 			if !ok {
 				continue
@@ -130,17 +124,15 @@ func migrateKeysetsUp(db *sql.DB) error {
 		}
 	}
 
-	_, err = db.Exec(`DELETE FROM account_objects WHERE object_type = 'keyset'`)
-	if err != nil {
+	if _, err := db.Exec(`DELETE FROM account_objects WHERE object_type = 'keyset'`); err != nil {
 		return fmt.Errorf("delete old keysets: %w", err)
 	}
 
-	return nil
+	_, err = db.Exec(`UPDATE config SET value = '60' WHERE name = 'version'`)
+	return err
 }
 
-// migrateKeysetsDown converts new-format keysets back to old format.
-// Used to create test databases with the old schema.
-func migrateKeysetsDown(db *sql.DB) error {
+func keysetsDown(db *sql.DB) error {
 	rows, err := db.Query(`SELECT key_name, data, associated_account FROM objects_associated WHERE type = 36`)
 	if err != nil {
 		return fmt.Errorf("query new keysets: %w", err)
@@ -170,31 +162,18 @@ func migrateKeysetsDown(db *sql.DB) error {
 			return fmt.Errorf("parse new keyset %s: %w", ks.keyName, err)
 		}
 
-		oldData := make(map[string]json.RawMessage)
-
-		// keyset_uuid from key_name column
 		uuidJSON, _ := json.Marshal(ks.keyName)
-		oldData["keyset_uuid"] = json.RawMessage(uuidJSON)
+		oldData := map[string]json.RawMessage{
+			"keyset_uuid":  json.RawMessage(uuidJSON),
+			"sn":           newData["sn"],
+			"encrypted_by": newData["encryptedBy"],
+		}
 
-		// Copy sn as-is
-		oldData["sn"] = newData["sn"]
-
-		// Rename encryptedBy → encrypted_by
-		oldData["encrypted_by"] = newData["encryptedBy"]
-
-		// Convert embedded objects back to JSON strings
-		for newKey, oldKey := range map[string]string{
-			"encSymKey":  "enc_sym_key",
-			"encPriKey":  "enc_pri_key",
-			"pubKey":     "pub_key",
-			"encSignKey": "enc_sign_key",
-			"pubSignKey": "pub_sign_key",
-		} {
+		for oldKey, newKey := range keysetFieldMap {
 			raw, ok := newData[newKey]
 			if !ok {
 				continue
 			}
-			// Wrap the object as a JSON string
 			strJSON, err := json.Marshal(string(raw))
 			if err != nil {
 				return fmt.Errorf("stringify %s in keyset %s: %w", newKey, ks.keyName, err)
@@ -216,10 +195,10 @@ func migrateKeysetsDown(db *sql.DB) error {
 		}
 	}
 
-	_, err = db.Exec(`DELETE FROM objects_associated WHERE type = 36`)
-	if err != nil {
+	if _, err := db.Exec(`DELETE FROM objects_associated WHERE type = 36`); err != nil {
 		return fmt.Errorf("delete new keysets: %w", err)
 	}
 
-	return nil
+	_, err = db.Exec(`UPDATE config SET value = '57' WHERE name = 'version'`)
+	return err
 }

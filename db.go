@@ -10,6 +10,8 @@ import (
 	"time"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+
+	"opcli/migrations"
 )
 
 var dbTimingEnabled = os.Getenv("OPCLI_TIMING") != ""
@@ -72,19 +74,21 @@ func openDB() (*sql.DB, error) {
 		}
 	}
 
-	// Check if any migrations are needed
-	var needed []migration
-	for _, m := range migrations {
-		yes, err := m.needsMigration(db)
+	// Check if any migrations are needed. Migrations are ordered; once
+	// one needs to run, all subsequent ones do too.
+	firstNeeded := -1
+	for i, m := range migrations.All {
+		yes, err := m.NeedsMigration(db)
 		if err != nil {
 			db.Close()
-			return nil, fmt.Errorf("migration check %q: %w", m.name, err)
+			return nil, fmt.Errorf("migration check %q: %w", m.Name, err)
 		}
 		if yes {
-			needed = append(needed, m)
+			firstNeeded = i
+			break
 		}
 	}
-	if len(needed) == 0 {
+	if firstNeeded < 0 {
 		return db, nil // fast path: no migrations
 	}
 
@@ -98,13 +102,13 @@ func openDB() (*sql.DB, error) {
 	db.Close()
 	logQueryTime("backupToMemory", t0)
 
-	for _, m := range needed {
+	for _, m := range migrations.All[firstNeeded:] {
 		t0 = time.Now()
-		if err := m.migrate(memDB); err != nil {
+		if err := m.Up(memDB); err != nil {
 			memDB.Close()
-			return nil, fmt.Errorf("migration %q: %w", m.name, err)
+			return nil, fmt.Errorf("migration %q: %w", m.Name, err)
 		}
-		logQueryTime("migrate:"+m.name, t0)
+		logQueryTime("migrate:"+m.Name, t0)
 	}
 
 	return memDB, nil
