@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 var dbTimingEnabled = os.Getenv("OPCLI_TIMING") != ""
@@ -19,13 +20,10 @@ func logQueryTime(name string, start time.Time) {
 	}
 }
 
-// testDBPath can be set by test builds to override the database path.
-var testDBPath string
-
 // getDBPath returns the path to the 1Password SQLite database
 func getDBPath() (string, error) {
-	if testDBPath != "" {
-		return testDBPath, nil
+	if p := os.Getenv("OPCLI_DB_PATH"); p != "" {
+		return p, nil
 	}
 
 	home, err := os.UserHomeDir()
@@ -51,13 +49,15 @@ const (
 
 // openDB opens the 1Password database in read-only mode, optionally
 // creating a versioned backup if OPCLI_AUTO_BACKUP_1PASSWORD_DB is set.
+// If the DB has an older schema, it makes an in-memory copy of the DB
+// and migrates it to the latest schema.
 func openDB() (*sql.DB, error) {
 	dbPath, err := getDBPath()
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", dbPath))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro", dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -72,7 +72,94 @@ func openDB() (*sql.DB, error) {
 		}
 	}
 
-	return db, nil
+	// Check if any migrations are needed
+	var needed []migration
+	for _, m := range migrations {
+		yes, err := m.needsMigration(db)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migration check %q: %w", m.name, err)
+		}
+		if yes {
+			needed = append(needed, m)
+		}
+	}
+	if len(needed) == 0 {
+		return db, nil // fast path: no migrations
+	}
+
+	// Copy to in-memory DB and apply migrations
+	t0 := time.Now()
+	memDB, err := backupToMemory(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("backup to memory: %w", err)
+	}
+	db.Close()
+	logQueryTime("backupToMemory", t0)
+
+	for _, m := range needed {
+		t0 = time.Now()
+		if err := m.migrate(memDB); err != nil {
+			memDB.Close()
+			return nil, fmt.Errorf("migration %q: %w", m.name, err)
+		}
+		logQueryTime("migrate:"+m.name, t0)
+	}
+
+	return memDB, nil
+}
+
+// backupToMemory copies an open database to an in-memory database using
+// SQLite's backup API, then closes the source.
+func backupToMemory(src *sql.DB) (*sql.DB, error) {
+	dst, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	// In-memory databases are per-connection. If the pool opens a second
+	// connection it would get a fresh, empty database. Pin to one connection.
+	dst.SetMaxOpenConns(1)
+
+	// We need raw access to both connections for the backup API.
+	srcConn, err := src.Conn(context.Background())
+	if err != nil {
+		dst.Close()
+		return nil, fmt.Errorf("get src conn: %w", err)
+	}
+	defer srcConn.Close()
+
+	dstConn, err := dst.Conn(context.Background())
+	if err != nil {
+		dst.Close()
+		return nil, fmt.Errorf("get dst conn: %w", err)
+	}
+	defer dstConn.Close()
+
+	err = dstConn.Raw(func(dstRaw any) error {
+		return srcConn.Raw(func(srcRaw any) error {
+			dstSqlite := dstRaw.(*sqlite3.SQLiteConn)
+			srcSqlite := srcRaw.(*sqlite3.SQLiteConn)
+
+			bk, err := dstSqlite.Backup("main", srcSqlite, "main")
+			if err != nil {
+				return fmt.Errorf("init backup: %w", err)
+			}
+			defer bk.Finish()
+
+			_, err = bk.Step(-1) // copy all pages
+			if err != nil {
+				return fmt.Errorf("backup step: %w", err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		dst.Close()
+		return nil, err
+	}
+
+	return dst, nil
 }
 
 // getDBVersion reads the schema version from the config table.

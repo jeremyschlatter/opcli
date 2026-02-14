@@ -161,7 +161,7 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 	dbPath := filepath.Join(dir, "test.sqlite")
 
 	// Create database
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}

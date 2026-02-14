@@ -86,7 +86,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	// Store credentials in keychain using the signed binary
 	cmd := exec.Command(binPath, "test-store-creds")
 	cmd.Env = append(os.Environ(),
-		"OPCLI_TEST_DB="+testDB.Path,
+		"OPCLI_DB_PATH="+testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+dataDir,
 		"OPCLI_TEST_ACCOUNT_UUID="+testDB.AccountUUID,
 		"OPCLI_TEST_SECRET_KEY="+testDB.SecretKey,
@@ -122,7 +122,7 @@ func (e *testEnv) cleanup(t *testing.T) {
 // baseEnv returns the base environment for CLI commands
 func (e *testEnv) baseEnv() []string {
 	return append(os.Environ(),
-		"OPCLI_TEST_DB="+e.testDB.Path,
+		"OPCLI_DB_PATH="+e.testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+e.dataDir,
 		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
 	)
