@@ -1,0 +1,784 @@
+op_db::core_db::dbdata/op-db/src/core_db/db.rsinvalid db schema version '1P:data/op-db/src/core_db/db.rs:519build_dateUPDATE item_overviews SET rejection_reason=0 WHERE rejection_reason<>0UPDATE config SET value=? WHERE name=?Db::newvacuuming dbfailed to vacuum db1P:data/op-db/src/core_db/db.rs:480config table was malformed1P:data/op-db/src/core_db/db.rs:584SELECT id FROM vault_items WHERE local_edit_count > 0 LIMIT 1CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_version INTEGER NOT NULL DEFAULT 0,
+    data BLOB NOT NULL
+CREATE TABLE IF NOT EXISTS account_objects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    local_version INTEGER NOT NULL DEFAULT 0,
+    data BLOB NOT NULL,
+    UNIQUE (account_id, uuid),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+CREATE INDEX IF NOT EXISTS account_objects_account_id_object_type ON account_objects(account_id, object_type);
+CREATE TABLE IF NOT EXISTS vault_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vault_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    local_edit_count INTEGER NOT NULL,
+    rejected_build_version INTEGER NOT NULL,
+    rejection_reason TEXT,
+    data BLOB NOT NULL,
+    UNIQUE (vault_id, uuid),
+    FOREIGN KEY (vault_id) REFERENCES account_objects(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS objects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_name TEXT NOT NULL,
+    updated_at integer not null,
+    created_at timestamp default current_timestamp,
+    data BLOB NOT NULL,
+    UNIQUE (key_name)
+CREATE TABLE IF NOT EXISTS config (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS item_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL,
+    usage_type TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    vault_uuid TEXT NOT NULL,
+    item_uuid TEXT NOT NULL,
+    used_at INTEGER NOT NULL,
+    item_version INTEGER NOT NULL
+INSERT INTO config (name, value) VALUES ("version", 1);
+1P:data/op-db/src/core_db/db.rs:613SELECT id FROM item_overviews WHERE local_edit_count > 0 LIMIT 11P:data/op-db/src/core_db/db.rs:620not able to modify database schema because of unsynced local changes, use previous version of 1Password to syncALTER TABLE accounts ADD COLUMN account_uuid TEXT NOT NULL DEFAULT '';
+UPDATE accounts SET account_uuid = json_extract(data, '$.account_uuid');
+CREATE UNIQUE INDEX accounts_uuid ON accounts (account_uuid);
+DROP TABLE vault_items;
+DELETE FROM account_objects WHERE object_type='vault';
+CREATE TABLE item_overviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vault_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    template_uuid TEXT NOT NULL,
+    changer_uuid TEXT NOT NULL,
+    favorite INTEGER NOT NULL,
+    trashed INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    local_edit_count INTEGER NOT NULL,
+    rejected_build_version INTEGER NOT NULL,
+    rejection_reason TEXT,
+    enc_overview BLOB NOT NULL,
+    UNIQUE (vault_id, uuid),
+    FOREIGN KEY (vault_id) REFERENCES account_objects(id) ON DELETE CASCADE
+CREATE TABLE item_details (
+    id INTEGER PRIMARY KEY,
+    enc_details BLOB NOT NULL,
+    FOREIGN KEY (id) REFERENCES item_overviews(id) ON DELETE CASCADE
+UPDATE config SET value=2 WHERE name='version';
+1P:data/op-db/src/core_db/db.rs:652Updated DB Schema to version 0031P:data/op-db/src/core_db/db.rs:658ALTER TABLE item_overviews RENAME TO o;
+ALTER TABLE item_details RENAME TO d;
+CREATE TABLE item_overviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vault_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    template_uuid TEXT NOT NULL,
+    changer_uuid TEXT NOT NULL,
+    favorite INTEGER NOT NULL,
+    trashed INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    local_edit_count INTEGER NOT NULL,
+    rejection_reason INTEGER NOT NULL,
+    enc_overview BLOB NOT NULL,
+    UNIQUE (vault_id, uuid),
+    FOREIGN KEY (vault_id) REFERENCES account_objects(id) ON DELETE CASCADE
+CREATE TABLE item_details (
+    id INTEGER PRIMARY KEY,
+    enc_details BLOB NOT NULL,
+    FOREIGN KEY (id) REFERENCES item_overviews(id) ON DELETE CASCADE
+INSERT INTO item_overviews (id, vault_id, uuid, created_at, updated_at, template_uuid, changer_uuid, favorite, trashed, version, local_edit_count, rejection_reason, enc_overview)
+SELECT id, vault_id, uuid, created_at, updated_at, template_uuid, changer_uuid, favorite, trashed, version, local_edit_count, 0, enc_overview FROM o;
+INSERT INTO item_details (id, enc_details) SELECT id, enc_details FROM d;
+CREATE INDEX item_overviews_rejection_reason ON item_overviews(rejection_reason) WHERE rejection_reason <> 0;
+CREATE INDEX item_overviews_local_edit_count ON item_overviews(local_edit_count) WHERE local_edit_count <> 0;
+DROP TABLE d;
+DROP TABLE o;
+UPDATE config SET value=3 WHERE name='version';
+INSERT INTO config (name, value) VALUES ('build_date', 0);
+1P:data/op-db/src/core_db/db.rs:664Updated DB Schema to version 0051P:data/op-db/src/core_db/db.rs:671DELETE FROM account_objects WHERE object_type='vault';
+UPDATE config SET value=5 WHERE name='version';1P:data/op-db/src/core_db/db.rs:680Updated DB Schema to version 0061P:data/op-db/src/core_db/db.rs:687DROP TABLE IF EXISTS autofill;
+CREATE TABLE IF NOT EXISTS autofill
+    account_id    INTEGER NOT NULL,
+    vault_id      INTEGER NOT NULL,
+    item_id       INTEGER NOT NULL,
+    category      TEXT    NOT NULL,
+    autofill_data BLOB    NOT NULL,
+    PRIMARY KEY (account_id, item_id) ON CONFLICT REPLACE
+    FOREIGN KEY (item_id) REFERENCES item_overviews (id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS collection_map
+    account_id      INTEGER NOT NULL,
+    collection_uuid TEXT    NOT NULL,
+    vault_ids       BLOB    NOT NULL,
+    PRIMARY KEY (account_id, collection_uuid) ON CONFLICT REPLACE
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+UPDATE config SET value=6 WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:696Updated DB Schema to version 0071P:data/op-db/src/core_db/db.rs:703ALTER TABLE item_overviews ADD COLUMN validated INTEGER NOT NULL DEFAULT 0;
+UPDATE config SET value=7 WHERE name='version';1P:data/op-db/src/core_db/db.rs:710Updated DB Schema to version 0081P:data/op-db/src/core_db/db.rs:717DELETE FROM autofill WHERE category != "001" AND category != "002" AND category != "004" AND category != "005";
+UPDATE config SET value=8 WHERE name='version';1P:data/op-db/src/core_db/db.rs:724Updated DB Schema to version 0091P:data/op-db/src/core_db/db.rs:731CREATE TABLE IF NOT EXISTS deleted_accounts (
+    account_uuid TEXT NOT NULL,
+    secret_key TEXT NOT NULL
+UPDATE config SET value=9 WHERE name='version';1P:data/op-db/src/core_db/db.rs:738Updated DB Schema to version 0111P:data/op-db/src/core_db/db.rs:745DROP TABLE IF EXISTS kanon_autofill;
+CREATE TABLE IF NOT EXISTS kanon_autofill
+    item_id       INTEGER NOT NULL,
+    account_id    INTEGER NOT NULL,
+    data          TEXT NOT NULL,
+    PRIMARY KEY (item_id, data) ON CONFLICT REPLACE
+    FOREIGN KEY (item_id) REFERENCES item_overviews (id) ON DELETE CASCADE
+CREATE INDEX idx_kanon ON kanon_autofill (item_id, data);
+UPDATE config SET value=11 WHERE name='version';1P:data/op-db/src/core_db/db.rs:752Updated DB Schema to version 0121P:data/op-db/src/core_db/db.rs:760DELETE from kanon_autofill1P:data/op-db/src/core_db/db.rs:767Updated DB Schema to version 0131P:data/op-db/src/core_db/db.rs:774CREATE TABLE IF NOT EXISTS enc_resources
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    enc_name   BLOB    NOT NULL,
+    data       BLOB    NOT NULL,
+    k_bucket   INTEGER,
+    UNIQUE (account_id, enc_name) ON CONFLICT REPLACE,
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+CREATE INDEX IF NOT EXISTS idx_enc_k_account ON enc_resources (k_bucket, account_id);
+UPDATE config SET value=13 WHERE name='version';
+1P:data/op-db/src/core_db/db.rs:781Updated DB Schema to version 0141P:data/op-db/src/core_db/db.rs:788-- Table to hold a single draft per account, this will hold to two blobs. The first will contain the
+-- encrypted item or the template and the second will contain the encrypted context.
+CREATE TABLE IF NOT EXISTS drafts
+    -- Template or encrypted item held as a blob, this is done for simplicity and to allow replacing
+    -- this with a template
+    data       BLOB NOT NULL,
+    -- Extra context (we dont want to know what is in here at this level, just that it is encrypted)
+    context    BLOB NOT NULL,
+    
+    account_id INTEGER NOT NULL,
+    -- We want there to be at most one draft per account, drop any old cruft when saving a new one
+    PRIMARY KEY (account_id) ON CONFLICT REPLACE,
+    -- Delete the draft if the account is deleted
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+UPDATE config SET value=14 WHERE name='version';1P:data/op-db/src/core_db/db.rs:795Updated DB Schema to version 0151P:data/op-db/src/core_db/db.rs:802-- Redundant with the `UNIQUE` constraint on `kanon_autofill`
+DROP INDEX idx_kanon;
+-- Filtering `autofill` items by category
+CREATE INDEX idx_autofill_category ON autofill (category);
+-- Covering index for filtering `autofill` items by domain name
+-- Same as `UNIQUE (item_id, data)`, but we cannot reverse the columns since
+-- `kanon_autofill` is also queried by `item_id`.
+CREATE INDEX idx_kanon_autofill_data_item_id ON kanon_autofill (data, item_id);
+-- Getting list of accounts in `kanon_autofill`
+CREATE INDEX idx_kanon_autofill_account_id ON kanon_autofill (account_id);
+UPDATE config SET value=15 WHERE name='version';
+1P:data/op-db/src/core_db/db.rs:809Updated DB Schema to version 0161P:data/op-db/src/core_db/db.rs:816ALTER TABLE enc_resources
+    RENAME TO enc_resources_old;
+CREATE TABLE enc_resources
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER NOT NULL,
+    enc_name      BLOB    NOT NULL,
+    data          BLOB    NOT NULL,
+    k_bucket      INTEGER,
+    cache_control INTEGER NULL,
+    UNIQUE (account_id, enc_name) ON CONFLICT REPLACE,
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+CREATE
+INDEX IF NOT EXISTS idx_enc_k_account ON enc_resources (k_bucket, account_id);
+INSERT INTO enc_resources (id, account_id, enc_name, data, k_bucket, cache_control)
+SELECT id, account_id, enc_name, data, k_bucket, (strftime('%s', 'now') + 1296000)
+FROM enc_resources_old;
+DROP TABLE enc_resources_old;
+UPDATE config
+SET value=16
+WHERE name = 'version';1P:data/op-db/src/core_db/db.rs:823Updated DB Schema to version 0171P:data/op-db/src/core_db/db.rs:830
+ALTER TABLE enc_resources
+    RENAME TO enc_resources_old;
+CREATE TABLE resources
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          BLOB    NOT NULL,
+    data          BLOB    NOT NULL,
+    k_bucket      INTEGER NULL,
+    account_id    INTEGER NULL,
+    cache_control INTEGER NULL,
+    is_encrypted  INTEGER NOT NULL,
+    CHECK ( (is_encrypted = 0 OR is_encrypted = 1) AND (is_encrypted = 0 OR
+                                                        (account_id IS NOT NULL AND k_bucket IS NOT NULL)) ),
+    UNIQUE (account_id, name) ON CONFLICT REPLACE,
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+insert into resources (name, data, k_bucket, account_id, cache_control, is_encrypted)
+SELECT enc_name, data, k_bucket, account_id, cache_control, 1
+from enc_resources_old;
+drop table enc_resources_old;
+CREATE INDEX IF NOT EXISTS idx_resources_k_bucket_account_id ON resources (k_bucket, account_id);
+UPDATE config
+SET value=17
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:837Updated DB Schema to version 0181P:data/op-db/src/core_db/db.rs:844-- Converting the data column from a TEXT to INTEGER
+ALTER TABLE kanon_autofill RENAME TO kanon_autofill_old;
+CREATE TABLE IF NOT EXISTS kanon_autofill
+    item_id       INTEGER NOT NULL,
+    account_id    INTEGER NOT NULL,
+    data          INTEGER NOT NULL,
+    PRIMARY KEY (item_id, data) ON CONFLICT REPLACE
+    FOREIGN KEY (item_id) REFERENCES item_overviews (id) ON DELETE CASCADE
+INSERT INTO kanon_autofill 
+SELECT old.item_id, old.account_id, CAST(old.data AS INTEGER)
+FROM kanon_autofill_old old
+WHERE 0;
+-- drop the old data 
+DROP TABLE kanon_autofill_old;
+-- Covering index for filtering `autofill` items by domain name
+-- Same as `UNIQUE (item_id, data)`, but we cannot reverse the columns since
+-- `kanon_autofill` is also queried by `item_id`.
+CREATE INDEX idx_kanon_autofill_data_item_id ON kanon_autofill (data, item_id);
+-- Getting list of accounts in `kanon_autofill`
+CREATE INDEX idx_kanon_autofill_account_id ON kanon_autofill (account_id);
+UPDATE config SET value=18 WHERE name='version';
+1P:data/op-db/src/core_db/db.rs:851Updated DB Schema to version 0191P:data/op-db/src/core_db/db.rs:858-- Not required it's just for safety.
+DELETE FROM resources where is_encrypted = 0;
+CREATE UNIQUE INDEX idx_resources_name_account_id_is_encrypted ON resources (
+    name, coalesce(account_id, is_encrypted));
+UPDATE config
+SET value=19
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:865SELECT account_id, context, data FROM drafts
+            INSERT INTO editing_drafts (
+                item_id,          vault_id,         uuid,             created_at,       updated_at,
+                template_uuid,    changer_uuid,     favorite,         trashed,          version,
+                local_edit_count, rejection_reason, enc_overview,     enc_details,
+                context,          account_id
+            ) VALUES (
+                ?,                ?,                ?,                ?,                ?,
+                ?,                ?,                ?,                ?,                ?,
+                ?,                ?,                ?,                ?,
+                ?,                ?
+            )
+        
+            INSERT INTO creation_drafts (context, account_id, uuid)
+            VALUES (?, ?, ?)
+        failed to deserialize item or template datafailed to generate uuid1P:data/op-db/src/core_db/db.rs:872CREATE TABLE editing_drafts (
+    -- Extra context (we dont want to know what is in here at this level, just that it is encrypted)
+    context    BLOB NOT NULL,
+    
+    account_id INTEGER NOT NULL,
+    -- Foreign key pointing to item_overviews
+    item_id INTEGER PRIMARY KEY,
+    -- These must be kept in sync with the item_overviews table!
+    vault_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    template_uuid TEXT NOT NULL,
+    changer_uuid TEXT NOT NULL,
+    favorite INTEGER NOT NULL,
+    trashed INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    local_edit_count INTEGER NOT NULL,
+    rejection_reason INTEGER NOT NULL,
+    enc_overview BLOB NOT NULL,
+    -- This must be kept in sync with the item_details table!
+    enc_details BLOB NOT NULL,
+    -- Delete the draft if the account is deleted
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    -- Keeping drafts arround after their origin item has been deleted would require switching
+    -- vaults iff the vault no longer exists and it would require turning an editing context into a
+    -- creation context. For now we just wont support it.
+    
+    -- Delete the draft if the item is deleted
+    FOREIGN KEY (item_id) REFERENCES item_overviews(id) ON DELETE CASCADE,
+    -- Delete the draft if the vault is deleted
+    FOREIGN KEY (vault_id) REFERENCES account_objects(id) ON DELETE CASCADE
+CREATE TABLE creation_drafts (
+    -- Extra context (we dont want to know what is in here at this level, just that it is encrypted)
+    context    BLOB NOT NULL,
+    
+    account_id INTEGER NOT NULL,
+    -- Local uuid, must be locally unique (generate a new one for each new creation draft)
+    uuid TEXT UNIQUE NOT NULL,
+    -- Delete the draft if the account is deleted
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+UPDATE config
+SET value=20
+WHERE name = 'version';DROP TABLE draftsitem_uuidUpdated DB Schema to version 0211P:data/op-db/src/core_db/db.rs:975CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    last_fetched INTEGER NOT NULL,
+    enc_overview BLOB NOT NULL,
+    UNIQUE (account_id, uuid),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+UPDATE config
+SET value = 21
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:982Updated DB Schema to version 0221P:data/op-db/src/core_db/db.rs:989CREATE TABLE search_weighting (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    -- Encrypted search weights. These are stored encrypted with a key derived from the account and
+    -- we should not treat these as high reliability data. Migrations can blow this away if/when
+    -- changes are required (this is not unique user data, only the app improving itself for
+    -- the user's workflow).
+    enc_weights    BLOB NOT NULL
+UPDATE config
+SET value = 22
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:996Updated DB Schema to version 0231P:data/op-db/src/core_db/db.rs:1003create table objects_dg_tmp
+	key_name TEXT not null,
+	data BLOB not null,
+	type int not null,
+	associated_item int
+		constraint objects_item_overviews_id_fk
+			references item_overviews
+				on delete cascade,
+	associated_account int
+		constraint objects_accounts_id_fk
+			references accounts
+				on delete cascade,
+	constraint objects_pk
+		primary key (key_name, type)
+insert into objects_dg_tmp(key_name, data, type) select key_name, data, 0 from objects;
+drop table objects;
+alter table objects_dg_tmp rename to objects;
+update objects set type = 1 where key_name = 'watchtower';
+update objects set type = 2 where key_name like 'op7_migration%';
+UPDATE config
+SET value = 23
+WHERE name = 'version';1P:data/op-db/src/core_db/db.rs:1010Updated DB Schema to version 0241P:data/op-db/src/core_db/db.rs:1017ALTER TABLE item_usage ADD COLUMN synced_at INT;
+UPDATE config
+SET value = 24
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1024Updated DB Schema to version 0251P:data/op-db/src/core_db/db.rs:1031-- Add a foreign key constraint on item_usage table to cascade 
+-- deletion with the associated account row. 
+-- Fixes Issue #15268 
+-- SQLite doesn't support ALTER TABLE ... ADD CONSTRAINT so we'll
+-- make a new table with the constraint we need, copy the rows,
+-- drop the original and rename the new table `item_usage`.
+-- The SQLite ALTER TABLE docs recommend this method.
+-- Just in case there is some junk about...
+DROP TABLE IF EXISTS tmp_item_usage;
+CREATE TABLE tmp_item_usage 
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL,
+    usage_type TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    vault_uuid TEXT NOT NULL,
+    item_uuid TEXT NOT NULL,
+    used_at INTEGER NOT NULL,
+    item_version INTEGER NOT NULL,
+    synced_at INTEGER DEFAULT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+INSERT INTO tmp_item_usage SELECT * FROM item_usage WHERE account_id IN (SELECT id FROM accounts);
+DROP TABLE item_usage;
+ALTER TABLE tmp_item_usage RENAME TO item_usage;
+PRAGMA foreign_key_check;
+UPDATE config
+SET value = 25
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1038SELECT id, data FROM accountsUPDATE accounts SET data = ? WHERE id = ?account_id 's data is not an objectcannot serialize new sign in providerUpdated DB Schema to version 0261P:data/op-db/src/core_db/db.rs:1044UPDATE config
+SET value=26
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1154NewSignInProviderSsodata did not match any variant of untagged enum OldSignInProviderForkedSecretKeyProvider is missing 'secret_key'Updated DB Schema to version 0271P:data/op-db/src/core_db/db.rs:1161CREATE TABLE IF NOT EXISTS ssh_pubkeys (
+  item_id INTEGER PRIMARY KEY,
+  pubkey BLOB NOT NULL,
+  integrity_hash BLOB NOT NULL,
+  FOREIGN KEY (item_id) REFERENCES item_overviews(id) ON DELETE CASCADE
+INSERT INTO ssh_pubkeys
+SELECT
+  associated_item as item_id,
+  data as pubkey,
+  -- Casting the string as a BLOB here
+  x'' as integrity_hash
+FROM objects
+WHERE type = 3; -- the SSH key type used to be serialized as 3
+DELETE FROM objects
+WHERE type = 3; -- the SSH key type used to be serialized as 3
+UPDATE config
+SET value = 27
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1168Updated DB Schema to version 0281P:data/op-db/src/core_db/db.rs:1175-- config_order defines the order in which keys should be served by the SSH agent
+-- it is defined by the order in which keys are referenced in the SSH agent config file
+CREATE TABLE IF NOT EXISTS ssh_pubkeys_new (
+  item_id INTEGER PRIMARY KEY,
+  config_order INTEGER NOT NULL,
+  pubkey BLOB NOT NULL,
+  integrity_hash BLOB NOT NULL,
+  FOREIGN KEY (item_id) REFERENCES item_overviews(id) ON DELETE CASCADE
+INSERT INTO ssh_pubkeys_new
+SELECT item_id,
+  0 as config_order,
+  pubkey,
+  integrity_hash
+FROM ssh_pubkeys;
+DROP TABLE IF EXISTS ssh_pubkeys;
+ALTER TABLE ssh_pubkeys_new RENAME TO ssh_pubkeys;
+UPDATE config
+SET value = 28
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1182Updated DB Schema to version 0291P:data/op-db/src/core_db/db.rs:1189CREATE TABLE IF NOT EXISTS feature_flags (
+  account_id INT NOT NULL,
+  name TEXT NOT NULL,
+  data BLOB NOT NULL,
+  PRIMARY KEY(account_id, name)
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+-- NB: ignore migrating feature flags, they'll be refreshed at the next unlock
+DELETE FROM objects
+WHERE type = 5; -- the feature flag key type used to be serialized as 5
+UPDATE config
+SET value = 29
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1196Updated DB Schema to version 0301P:data/op-db/src/core_db/db.rs:1203DROP TABLE IF EXISTS resources;
+UPDATE config
+SET value = 30
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1210Updated DB Schema to version 0311P:data/op-db/src/core_db/db.rs:1216DELETE FROM kanon_autofill;
+DELETE FROM autofill;
+UPDATE config
+SET value = 31
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1223Updated DB Schema to version 0321P:data/op-db/src/core_db/db.rs:1229CREATE TABLE IF NOT EXISTS account_policies (
+	account_uuid TEXT NOT NULL,
+	uuid TEXT NOT NULL,
+	policy_name TEXT NOT NULL,
+	definition_hash BLOB NOT NULL,
+	definition BLOB NOT NULL,
+	last_updated INTEGER,
+	PRIMARY KEY (account_uuid, uuid) ON CONFLICT REPLACE
+	FOREIGN KEY (account_uuid) REFERENCES accounts (account_uuid) ON DELETE CASCADE
+	UNIQUE (account_uuid, policy_name) ON CONFLICT REPLACE
+UPDATE config
+SET value = 32
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1236Updated DB Schema to version 0331P:data/op-db/src/core_db/db.rs:1242-- ignoring the `last_updated` and `uuid` fields makes the API much simpler,
+-- but sqlite does not support dropping primary key columns so recreate the table instead
+CREATE TABLE IF NOT EXISTS account_policies_tmp (
+    account_uuid TEXT NOT NULL,
+    policy_name TEXT NOT NULL,
+    definition_hash BLOB NOT NULL,
+    definition BLOB NOT NULL,
+    FOREIGN KEY (account_uuid) REFERENCES accounts (account_uuid) ON DELETE CASCADE
+    UNIQUE (account_uuid, policy_name) ON CONFLICT REPLACE
+-- copy the data over
+INSERT INTO account_policies_tmp (account_uuid, policy_name, definition_hash, definition)
+    SELECT account_uuid, policy_name, definition_hash, definition FROM account_policies;
+-- rename the table
+DROP TABLE account_policies;
+ALTER TABLE account_policies_tmp RENAME TO account_policies;
+UPDATE config
+SET value = 33
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1249Updated DB Schema to version 0341P:data/op-db/src/core_db/db.rs:1255CREATE TABLE IF NOT EXISTS feature_flags_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER,
+  name TEXT NOT NULL,
+  data BLOB NOT NULL,
+  UNIQUE (account_id, name),
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+CREATE INDEX idx_feature_flags_account_id ON feature_flags_new (account_id);
+DROP TABLE IF EXISTS feature_flags;
+ALTER TABLE feature_flags_new RENAME TO feature_flags;
+UPDATE config
+SET value = 34
+WHERE name = 'version';1P:data/op-db/src/core_db/db.rs:1262Updated DB Schema to version 0351P:data/op-db/src/core_db/db.rs:1268CREATE TABLE IF NOT EXISTS snippet_shortcuts (
+	account_id INT NOT NULL,
+	shortcut TEXT NOT NULL,
+	item_id INT NOT NULL,
+	PRIMARY KEY(item_id) ON CONFLICT REPLACE
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+	FOREIGN KEY (item_id) REFERENCES item_overviews (id) ON DELETE CASCADE
+UPDATE config
+SET value = 35
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1275Updated DB Schema to version 0361P:data/op-db/src/core_db/db.rs:1281DELETE FROM kanon_autofill;
+DELETE FROM autofill;
+UPDATE config
+SET value = 36
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1288Updated DB Schema to version 0371P:data/op-db/src/core_db/db.rs:1294CREATE TABLE IF NOT EXISTS developer_activity_log (
+    -- DeveloperActivityLogEntryType enum
+    entry_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    -- Item Row ID associated with the request; only for SSH requests,
+    -- will be null for CLI requests; not adding a foreign key for this field,
+    -- because if a user deletes an item, we would still want to show the activity
+    -- log entry, we just wouldn't be able to show the item details, so we don't want
+    -- to use `ON CASCADE DELETE` here.
+    item_id INTEGER,
+    -- *encrypted* application info
+    enc_application_info BLOB NOT NULL,
+    -- *encrypted* full process tree
+    enc_process_tree BLOB NOT NULL,
+    -- only for SSH requests, should always be false for CLI requests
+    is_background_request INTEGER NOT NULL,
+    CHECK (is_background_request = 0 OR is_background_request = 1),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+UPDATE config
+SET value = 37
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1301Updated DB Schema to version 0381P:data/op-db/src/core_db/db.rs:1307DELETE FROM kanon_autofill;
+DELETE FROM autofill;
+UPDATE config
+SET value = 38
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1314Updated DB Schema to version 0391P:data/op-db/src/core_db/db.rs:1319CREATE TABLE IF NOT EXISTS account_feature_flags (
+  account_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  data BLOB NOT NULL,
+  PRIMARY KEY (account_id, name),
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS pre_registration_feature_flags (
+  name TEXT PRIMARY KEY NOT NULL,
+  data BLOB NOT NULL
+DROP INDEX IF EXISTS idx_account_feature_flags_account_id;
+CREATE INDEX idx_account_feature_flags_account_id ON account_feature_flags (account_id);
+DROP TABLE IF EXISTS feature_flags;
+UPDATE config
+SET value = 39
+WHERE name = 'version';1P:data/op-db/src/core_db/db.rs:1326Updated DB Schema to version 0401P:data/op-db/src/core_db/db.rs:1332CREATE TABLE IF NOT EXISTS activation_hub_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  uuid TEXT NOT NULL,
+  name TEXT NOT NULL,
+  definition BLOB NOT NULL,
+  dirty INTEGER NOT NULL,
+  UNIQUE (account_id, uuid, name),
+  FOREIGN KEY (account_id) REFERENCES account_objects(id) ON DELETE CASCADE
+UPDATE config
+SET value = 40
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1339Updated DB Schema to version 0411P:data/op-db/src/core_db/db.rs:1345DROP TABLE IF EXISTS activation_hub_tasks;
+CREATE TABLE IF NOT EXISTS activation_hub_tasks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL,
+  uuid TEXT NOT NULL,
+  name TEXT NOT NULL,
+  definition BLOB NOT NULL,
+  dirty INTEGER NOT NULL,
+  UNIQUE (account_id, uuid, name),
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+UPDATE config
+SET value = 41
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1352Updated DB Schema to version 0421P:data/op-db/src/core_db/db.rs:1358-- we are cleaning up left-over objects which should have
+-- been deleted by init_040.sql or init_041.sql, but weren't.
+DELETE FROM objects
+WHERE type = 10; -- object type 10 is ObjectRowType::ActivationHub
+INSERT INTO objects
+(key_name, `type`, data, associated_item, associated_account)
+SELECT
+    -- build the key by concatenating the task name and UUID
+    account_id || '-' || name || '-' || uuid,
+    -- 10 is ObjectRowType::ActivationHub
+    10,
+    -- merge the `dirty` column into the JSON data.
+    -- Note the `CAST(json AS BLOB)`; without it, the query
+    -- will silently convert the column type to `TEXT`,
+    -- leading to application errors. Note also that
+    -- this is NOT the same as using the `jsonb_` function
+    -- variants, those return a custom binary format that really
+    -- isn't useful to application code since it's not parseable
+    -- by tools like serde, its not text, its a custom binary format.
+    -- With `BLOB` we are just storing JSON text as bytes.
+    CAST(json_set(
+        definition,
+        '$.dirty',
+        CASE
+            WHEN dirty = 0 THEN json('false')
+            ELSE json('true')
+        END
+    ) AS BLOB) AS data,
+    -- ActivationHub tasks do not have an associated item
+    NULL,
+    account_id
+FROM activation_hub_tasks
+-- there shouldn't be any, but in case there are,
+-- ignore rows with corrupted JSON; the 2nd parameter
+-- is a bitmask, see: https://sqlite.org/json1.html#the_json_valid_function
+WHERE json_valid(definition, 6) = 1;
+UPDATE config
+SET value = 42
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1365Updated DB Schema to version 0431P:data/op-db/src/core_db/db.rs:1371-- feature flags were in the objects table before, then moved out,
+-- since we're moving them back, we're going to reuse the ObjectRowType
+-- value, so clean out any existing ones
+-- 5 is ObjectRowType::FeatureFlag
+-- 19 is ObjectRowType::PreRegistrationFeatureFlag
+DELETE FROM objects WHERE `type` = 5;
+INSERT INTO objects (key_name, `type`, data, associated_account, associated_item)
+SELECT
+    -- build the key in the same format as the ObjectConfig impl
+    account_id || '-' || name,
+    5,
+    data,
+    account_id,
+    NULL
+FROM account_feature_flags;
+DROP TABLE IF EXISTS account_feature_flags;
+INSERT INTO objects (key_name, `type`, data, associated_account, associated_item)
+SELECT
+    -- build the key in the same format as the ObjectConfig impl
+    name,
+    19,
+    data,
+    NULL,
+    NULL
+FROM pre_registration_feature_flags;
+DROP TABLE IF EXISTS pre_registration_feature_flags;
+UPDATE config
+SET value = 43
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1378Updated DB Schema to version 0441P:data/op-db/src/core_db/db.rs:13841P:data/op-db/src/core_db/db.rs:1393Updated DB Schema to version 0451P:data/op-db/src/core_db/db.rs:1399-- NB: DB version 44 is a Rust-based migration, hence why this migration's
+-- file name skips a number and sets the DB version to 45
+DROP TABLE IF EXISTS activation_hub_tasks;
+UPDATE config
+SET value = 45
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1406Updated DB Schema to version 0461P:data/op-db/src/core_db/db.rs:1412CREATE TABLE IF NOT EXISTS objects_unassociated (
+    key_name TEXT NOT NULL,
+    type INT NOT NULL,
+    data BLOB NOT NULL,
+    PRIMARY KEY (key_name, type)
+INSERT INTO objects_unassociated (key_name, type, data)
+SELECT key_name, type, data FROM objects WHERE associated_account IS NULL;
+-- we can't modify table PKs and stuff so create a new table and copy the data
+CREATE TABLE objects_associated (
+    key_name TEXT NOT NULL,
+    type INT NOT NULL,
+    data BLOB NOT NULL,
+    associated_item INT,
+    associated_account INT NOT NULL, -- associated_account is no longer nullable
+    PRIMARY KEY (key_name, type, associated_account),
+    CONSTRAINT objects_associated_account_fk
+        FOREIGN KEY (associated_account) REFERENCES accounts (id) ON DELETE CASCADE,
+    CONSTRAINT objects_associated_item_fk
+        FOREIGN KEY (associated_item) REFERENCES item_overviews (id) ON DELETE CASCADE
+INSERT INTO objects_associated (key_name, type, data, associated_item, associated_account)
+SELECT key_name, type, data, associated_item, associated_account FROM objects
+WHERE associated_account IS NOT NULL;
+DROP TABLE objects;
+UPDATE config
+SET value = 46
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1419Updated DB Schema to version 0471P:data/op-db/src/core_db/db.rs:1425UPDATE objects_associated
+SET key_name = ltrim(key_name, concat(associated_account, "-"))
+WHERE type IN (5, 10, 19, 20);
+UPDATE objects_associated
+SET key_name = subquery.new_key
+FROM (
+	SELECT
+		objects_associated.associated_account,
+		objects_associated.type,
+		objects_associated.key_name as old_key,
+		concat(account_objects.uuid, ".", item_overviews.uuid) as new_key
+	FROM objects_associated
+	INNER JOIN item_overviews
+	ON item_overviews.id = objects_associated.associated_item
+	INNER JOIN account_objects
+	ON account_objects.id = item_overviews.vault_id
+	WHERE objects_associated.type IN (4, 9)
+) as subquery
+WHERE objects_associated.associated_account = subquery.associated_account
+	AND objects_associated.type = subquery.type
+	AND objects_associated.key_name = subquery.old_key;
+UPDATE config
+SET value = 47
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1432Updated DB Schema to version 0481P:data/op-db/src/core_db/db.rs:14381P:data/op-db/src/core_db/db.rs:1447Updated DB Schema to version 0491P:data/op-db/src/core_db/db.rs:14531P:data/op-db/src/core_db/db.rs:1460Updated DB Schema to version 0501P:data/op-db/src/core_db/db.rs:1466DROP TABLE IF EXISTS deleted_accounts;
+DROP TABLE IF EXISTS search_weighting;
+DROP TABLE IF EXISTS users;
+UPDATE config
+SET value = 50
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1473Updated DB Schema to version 0511P:data/op-db/src/core_db/db.rs:1479INSERT INTO objects_associated (
+	key_name,
+	type,
+	data,
+	associated_item,
+	associated_account
+SELECT
+  concat(account_objects.uuid, ".", item_overviews.uuid),
+  26,
+  snippet_shortcuts.shortcut,
+  snippet_shortcuts.item_id,
+  snippet_shortcuts.account_id
+FROM snippet_shortcuts
+INNER JOIN item_overviews
+ON item_overviews.id = snippet_shortcuts.item_id
+INNER JOIN account_objects
+ON account_objects.id = item_overviews.vault_id;
+DROP TABLE IF EXISTS snippet_shortcuts;
+UPDATE config
+SET value = 51
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1486Updated DB Schema to version 0521P:data/op-db/src/core_db/db.rs:1492INSERT INTO objects_associated (
+  type,
+  key_name,
+  associated_account,
+  associated_item,
+  data
+SELECT
+  27, -- ObjectRowType::ItemUsage
+  item_usage.uuid,
+  item_usage.account_id,
+  item_overviews.id,
+  json_object(
+    'usage_type', item_usage.usage_type,
+    'used_at', item_usage.used_at,
+    'item_version', item_usage.item_version,
+    'synced_at', item_usage.synced_at
+  ) as BLOB
+FROM item_usage
+INNER JOIN item_overviews
+ON item_overviews.uuid = item_usage.item_uuid
+INNER JOIN account_objects
+ON account_objects.id = item_overviews.vault_id
+  AND account_objects.uuid = item_usage.vault_uuid
+  AND account_objects.account_id = item_usage.account_id;
+DROP TABLE IF EXISTS item_usage;
+UPDATE config
+SET value = 52
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1499Updated DB Schema to version 0531P:data/op-db/src/core_db/db.rs:15051P:data/op-db/src/core_db/db.rs:1512Updated DB Schema to version 0541P:data/op-db/src/core_db/db.rs:1518INSERT INTO objects_associated (
+  type,
+  key_name,
+  associated_account,
+  associated_item,
+  data
+SELECT
+  29, -- ObjectRowType::CreationDraft
+  uuid,
+	account_id,
+	NULL,
+	context
+FROM creation_drafts;
+DROP TABLE IF EXISTS creation_drafts;
+UPDATE config
+SET value = 54
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1525Updated DB Schema to version 0551P:data/op-db/src/core_db/db.rs:15311P:data/op-db/src/core_db/db.rs:1538Updated DB Schema to version 0561P:data/op-db/src/core_db/db.rs:1544DELETE FROM objects_associated
+WHERE type = 31 OR type = 32;
+UPDATE config
+SET value = 56
+WHERE name = 'version';
+1P:data/op-db/src/core_db/db.rs:1551Updated DB Schema to version 0571P:data/op-db/src/core_db/db.rs:15571P:data/op-db/src/core_db/db.rs:1564Updated DB Schema to version 0581P:data/op-db/src/core_db/db.rs:15701P:data/op-db/src/core_db/db.rs:1577Updated DB Schema to version 0591P:data/op-db/src/core_db/db.rs:1583UPDATE config SET value = 59 WHERE name = 'version'1P:data/op-db/src/core_db/db.rs:1594Updated DB Schema to version 0601P:data/op-db/src/core_db/db.rs:16001P:data/op-db/src/core_db/db.rs:1607entryTypeitemSpecifiercreatedAtsessionIdencApplicationInfoencProcessTreeisBackgroundRequest
+        SELECT
+            entry_type,
+            created_at,
+            session_id,
+            account_id,
+            item_id,
+            enc_application_info,
+            enc_process_tree,
+            is_background_request
+        FROM developer_activity_log
+        
+        SELECT
+            accounts.account_uuid,
+            account_objects.uuid,
+            item_overviews.uuid
+        FROM item_overviews
+        INNER JOIN account_objects
+        ON account_objects.id = item_overviews.vault_id
+        INNER JOIN accounts
+        ON accounts.id = account_objects.account_id
+        WHERE item_overviews.id = :item_id
+        
+            INSERT INTO objects_associated(key_name, type, associated_item, associated_account, data)
+            VALUES(:key_name, 24, NULL, :associated_account, :data)
+        DROP TABLE IF EXISTS developer_activity_logUPDATE config SET value = 48 WHERE name = 'version';unable to deserialize developer activity rowDeviceUUIDcould not generate uuidcannot serialize tagged newtype variant :: containing NoneErrorBadEncodingSerializingValidationKeyRejected-- ;tracing::span decryption_kid:  alg: KeyOperationNotAllowed(SymmetricKeyBadFields(BadDerivationAlg(SecretKey(BadEmail(SrpUnknownMethod(SrpUnknownAlgorithm(InvalidPbkdf2Iterations(RsaInvalidPublicKey(RsaDecryptFailed { }GcmBadNonceLen(MismatchedPublicKeyType(WrongKeyCurve(WrongKeyType(JsonError(MasterPassword(JwkExportFailure(valid_up_toerror_lenVerifyEncryptDecryptWrapKeyUnwrapKeyDeriveKeyDeriveBitsextended_codeRSAOctECOKPUuid(InternalMalfunctionDatabaseBusyDatabaseLockedOutOfMemoryOperationInterruptedSystemIoFailureDatabaseCorruptCannotOpenFileLockingProtocolFailedSchemaChangedTooBigConstraintViolationTypeMismatchApiMisuseNoLargeFileSupportAuthorizationForStatementDeniedParameterOutOfRangeNotADatabaseUnknown conn: <rusqlite :: Connection>, counter: X25519LoggableStringsourceop_log::private<redacted json data error><redacted io error>1P:TryFromIntErrorBadEncoding(Serializing(Validation(BadLengthBadVersionRSAOAEPRSAOAEP256ECDHESMalformedDatabaseUnknownSchemaOther(AddressMissingStringTooShortStringTooLongMalformedAtSignMissingPeriodMailboxMissingMailboxContainsInvalidCharactersDomainMissingDomainTooShortDomainHasTooFewPartsDomainPartMissingDomainPartContainsInvalidCharactersDomainTLDTooShortDomainTLDContainsInvalidCharactersEmptyInvalidTypeOutOfRangeInvalidBlobSizeexpected_sizeblob_sizeOtheraccountUuidvaultUuid span=<- tracing::span::active-> secret key was the wrong lengthunrecognized secret key versionResourcesDb {The address was zero-length.The address was too short.The address was too long.The address did not have exactly one @ sign.The address did not have at least one period.The address was missing a mailbox part.The mailbox part contains invalid characters.The address was missing a domain part.The domain part was too short.The domain part had too few dot-separated parts.The address had a zero-length dot-separated domain part.The address had a dot-separated domain part containing invalid characters.The address had a zero-length TLD.The domain TLD was too short.The domain TLD was too long.The domain TLD contained invalid characters.master password was empty0010030021150040050061121011021031111131051041060$$107109110114116108100099900909910914912913serialize_value called before serialize_keyindex not foundCOMMITTransaction dropped unexpectedly.Null pointer from sqlite3_column_name: Out of memory?Column out of boundsinvalid UTF-8Invalid UTF-8 sequence in column nameexpected RawValue
+secret key was not encoded correctlyAdditionalSignInProviderinternally tagged enum AdditionalSignInProviderSignInProviderinternally tagged enum SignInProvider
+Db {Templateinit_001init_002:type_of:item_idvault_idTRUNCATEinit_003init_005init_006init_007init_008init_009init_011init_012init_013init_014init_015init_016init_017init_018init_019init_020init_021init_022init_023init_024init_025init_026init_027init_028init_029init_030init_031init_032init_033init_034init_035init_036init_037init_038init_039init_040init_041init_042init_043init_044init_045init_046init_047init_048init_049init_050init_051init_052init_053init_054init_055init_056init_057init_058init_059init_060metadata_versionuser_preferencespolicies_version
