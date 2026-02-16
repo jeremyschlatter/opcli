@@ -148,11 +148,11 @@ DROP TABLE IF EXISTS kanon_autofill
 UPDATE config SET value = 55 WHERE name = 'version'
 ```
 
-**Symbol evidence**: `HashMap<NewRowKey, HashSet<u16>>` tells us the kanon migration groups/deduplicates by key. The `data` column in `kanon_autofill` is `INTEGER` (see v11 schema), and `HashSet<u16>` suggests these are small integer hash values being collected per item.
+**Symbol evidence**: `HashMap<NewRowKey, HashSet<u16>>` tells us the kanon migration groups/deduplicates by key. The `data` column in `kanon_autofill` was originally `TEXT` (v11) but was converted to `INTEGER` in v18 (migration_018.sql explicitly does `CAST(old.data AS INTEGER)`). `HashSet<u16>` suggests these are small integer hash values being collected per item.
 
 **Error messages**: `"failed to serialize hashes"` (for kanon) and `"failed to serialize autofill data"` (for autofill). The word "hashes" confirms the kanon data is hash-related.
 
-**Data format inference**: For kanon, the `data` column in the old table is an integer (a hash). The new payload likely wraps these as a set: `{hashes: [h1, h2, ...]}` or similar. For autofill, the old `autofill_data` blob is likely passed through with the `category` added: `{category: "001", ...autofill_data}`. The `:vault_id` parameter in the autofill lookup (absent from kanon) comes from the `vault_id` column that exists in `autofill` but not in `kanon_autofill`.
+**Data format inference**: For kanon, the `data` column in the old table is an integer hash value (since v18). The migration groups these by (item_id, account_id) key and stores them as a sorted list: `[h1, h2, ...]`. For autofill, the old `autofill_data` blob is passed through as-is. The `:vault_id` parameter in the autofill lookup (absent from kanon) comes from the `vault_id` column that exists in `autofill` but not in `kanon_autofill`.
 
 ### Migration 057: account_objects categories → objects_associated (type 33)
 
@@ -229,6 +229,18 @@ UPDATE config SET value = 58 WHERE name = 'version'
 - Any filtering or validation the Rust code performs beyond what SQL handles (e.g., `json_valid()` checks, error handling for corrupt rows). The error messages suggest rows with bad data are skipped (`filter_map` in the symbols), but we don't know the exact conditions.
 - The exact binary encoding of some blob fields (e.g., whether `vault_ids` in `collection_map` is JSON, MessagePack, or raw integers).
 
+## Implementation Notes
+
+Things learned while implementing the Python versions:
+
+1. **Rust-only migrations have no SQL files.** The migration runner lists SQL files to determine which versions to run. The Rust-only versions (44, 49, 53, 55, 57, 58) have no `.sql` file, so they must be injected separately into the version sequence — they can't piggyback on the SQL file loop.
+
+2. **v57 categories are a significant data migration on real DBs.** The v25 database had 22 categories in `account_objects`. The v57 migration moved all 22 to `objects_associated`, reducing `account_objects` from 31 rows (9 vaults + 22 categories) to 9 (vaults only). This is the only Rust migration that moved non-empty data in our v25 test case.
+
+3. **v44 writes to `objects`, not `objects_associated`.** At v44, the `objects` table still exists (it doesn't get split into `objects_unassociated`/`objects_associated` until v46). The INSERT target is `objects`, not `objects_associated`.
+
+4. **The v49 DELETE-then-INSERT pattern.** The migration does `DELETE FROM objects_associated WHERE type = 3` before inserting. This is because type 3 (SSH keys) existed in the old `objects` table and was carried into `objects_associated` by v46. The migration replaces those entries with properly-formatted ones from `ssh_pubkeys`.
+
 ## Practical Impact
 
-For the v25 database we're migrating, **all source tables are empty**, so the Rust migrations are pure no-ops — just `DROP TABLE` + `UPDATE config`. The reconstruction matters for correctness and for future databases that might have data in these tables.
+For the v25 database we're migrating, **all source tables except categories are empty**, so most Rust migrations are pure no-ops — just `DROP TABLE` + `UPDATE config`. The v57 category migration is the exception, successfully moving 22 category objects. The reconstruction matters for correctness and for future databases that might have data in these tables.
