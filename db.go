@@ -74,16 +74,16 @@ func openDB() (*sql.DB, error) {
 		}
 	}
 
-	// Check if any migrations are needed. Migrations are ordered; once
-	// one needs to run, all subsequent ones do too.
+	// Check DB version and find first applicable migration.
+	version, err := getDBVersion(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	firstNeeded := -1
 	for i, m := range migrations.All {
-		yes, err := m.NeedsMigration(db)
-		if err != nil {
-			db.Close()
-			return nil, fmt.Errorf("migration check %q: %w", m.Name, err)
-		}
-		if yes {
+		if m.Version > version {
 			firstNeeded = i
 			break
 		}
@@ -92,7 +92,7 @@ func openDB() (*sql.DB, error) {
 		return db, nil // fast path: no migrations
 	}
 
-	// Copy to in-memory DB and apply migrations
+	// Copy to in-memory DB and apply migrations.
 	t0 := time.Now()
 	memDB, err := backupToMemory(db)
 	if err != nil {
@@ -104,11 +104,30 @@ func openDB() (*sql.DB, error) {
 
 	for _, m := range migrations.All[firstNeeded:] {
 		t0 = time.Now()
-		if err := m.Up(memDB); err != nil {
+		if err := migrations.Run(memDB, m); err != nil {
 			memDB.Close()
-			return nil, fmt.Errorf("migration %q: %w", m.Name, err)
+			return nil, fmt.Errorf("migration v%d: %w", m.Version, err)
 		}
-		logQueryTime("migrate:"+m.Name, t0)
+		logQueryTime(fmt.Sprintf("migrate:v%d", m.Version), t0)
+	}
+
+	// Drop orphaned indexes whose tables no longer exist.
+	rows, err := memDB.Query("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		memDB.Close()
+		return nil, fmt.Errorf("query orphaned indexes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var idxName, tblName string
+		if err := rows.Scan(&idxName, &tblName); err != nil {
+			memDB.Close()
+			return nil, fmt.Errorf("scan index: %w", err)
+		}
+		var exists int
+		if memDB.QueryRow("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", tblName).Scan(&exists) != nil {
+			memDB.Exec(fmt.Sprintf("DROP INDEX IF EXISTS [%s]", idxName))
+		}
 	}
 
 	return memDB, nil

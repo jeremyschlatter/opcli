@@ -29,11 +29,11 @@ libtouchid_stub.a: touchid_stub.m
 	rm -f touchid_stub.o
 
 # Build Go binary (requires libtouchid.a)
-opcli: libtouchid.a *.go go.mod go.sum
+opcli: libtouchid.a $(shell find . -name '*.go' -not -path './db-history/*') $(shell find . -name '*.sql' -path './migrations/*') go.mod go.sum
 	go build -ldflags "-X main.Version=$(VERSION)" -o opcli .
 
 # Build test binary with stubbed TouchID
-opcli-test: libtouchid_stub.a *.go go.mod go.sum
+opcli-test: libtouchid_stub.a $(shell find . -name '*.go' -not -path './db-history/*') $(shell find . -name '*.sql' -path './migrations/*') go.mod go.sum
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
 
 # Run e2e tests
