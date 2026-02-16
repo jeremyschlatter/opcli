@@ -112,21 +112,26 @@ func openDB() (*sql.DB, error) {
 	}
 
 	// Drop orphaned indexes whose tables no longer exist.
-	rows, err := memDB.Query("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
-	if err != nil {
-		memDB.Close()
-		return nil, fmt.Errorf("query orphaned indexes: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var idxName, tblName string
-		if err := rows.Scan(&idxName, &tblName); err != nil {
+	// Collect first, then drop — can't write while rows cursor holds the connection.
+	{
+		rows, err := memDB.Query(`
+			SELECT i.name FROM sqlite_master i
+			WHERE i.type='index' AND i.name NOT LIKE 'sqlite_%'
+			AND NOT EXISTS (SELECT 1 FROM sqlite_master t WHERE t.type='table' AND t.name=i.tbl_name)
+		`)
+		if err != nil {
 			memDB.Close()
-			return nil, fmt.Errorf("scan index: %w", err)
+			return nil, fmt.Errorf("query orphaned indexes: %w", err)
 		}
-		var exists int
-		if memDB.QueryRow("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", tblName).Scan(&exists) != nil {
-			memDB.Exec(fmt.Sprintf("DROP INDEX IF EXISTS [%s]", idxName))
+		var orphaned []string
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			orphaned = append(orphaned, name)
+		}
+		rows.Close()
+		for _, name := range orphaned {
+			memDB.Exec(fmt.Sprintf("DROP INDEX IF EXISTS [%s]", name))
 		}
 	}
 
