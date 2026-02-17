@@ -285,7 +285,7 @@ func migrateV55Autofill(db *sql.DB) error {
 			itemID    int64
 			accountID int64
 		}
-		grouped := map[kanonKey][]int{}
+		grouped := map[kanonKey]map[int]bool{}
 		for rows.Next() {
 			var itemID, accountID int64
 			var hashVal int
@@ -293,13 +293,16 @@ func migrateV55Autofill(db *sql.DB) error {
 				return fmt.Errorf("v55: scan kanon: %w", err)
 			}
 			k := kanonKey{itemID, accountID}
-			grouped[k] = append(grouped[k], hashVal)
+			if grouped[k] == nil {
+				grouped[k] = map[int]bool{}
+			}
+			grouped[k][hashVal] = true
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("v55: iterate kanon: %w", err)
 		}
 
-		for k, hashes := range grouped {
+		for k, hashSet := range grouped {
 			var vaultUUID, itemUUID string
 			err := db.QueryRow(`
 				SELECT account_objects.uuid, item_overviews.uuid
@@ -312,6 +315,10 @@ func migrateV55Autofill(db *sql.DB) error {
 			}
 			if err != nil {
 				return fmt.Errorf("v55: lookup kanon item %d: %w", k.itemID, err)
+			}
+			hashes := make([]int, 0, len(hashSet))
+			for h := range hashSet {
+				hashes = append(hashes, h)
 			}
 			sort.Ints(hashes)
 			data, _ := json.Marshal(hashes)
@@ -496,7 +503,7 @@ func migrateV58EditingDrafts(db *sql.DB) error {
 		accountID       int64
 		itemID          int64
 		vaultID         int64
-		rejectionReason sql.NullString
+		rejectionReason *string
 		localEditCount  int
 		templateUUID    string
 		changerUUID     string
@@ -541,7 +548,7 @@ func migrateV58EditingDrafts(db *sql.DB) error {
 			"isFavorite":      r.favorite != 0,
 			"state":           state,
 			"version":         r.version,
-			"rejectionReason": r.rejectionReason.String,
+			"rejectionReason": r.rejectionReason,
 			"localEditCount":  r.localEditCount,
 			"encOverview":     base64.StdEncoding.EncodeToString(r.encOverview),
 			"encDetails":      base64.StdEncoding.EncodeToString(r.encDetails),
