@@ -1,3 +1,8 @@
+version:
+  - name: prints version
+    args: [version]
+    outPrefix: "opcli "
+
 read:
   - name: read password field
     args: [read, "op://Private/Test Login/password"]

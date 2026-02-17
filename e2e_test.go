@@ -160,6 +160,7 @@ type yamlTestCase struct {
 	Args      []string          `yaml:"args"`
 	Stdin     string            `yaml:"stdin"`
 	Out       string            `yaml:"out"`
+	OutPrefix string            `yaml:"outPrefix"`
 	Err       string            `yaml:"err"`
 	ErrPrefix string            `yaml:"errPrefix"`
 	Code      int               `yaml:"code"`
@@ -225,6 +226,10 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 						t.Errorf("stdout:\ngot:  %q\nwant: %q", stdout, tc.Out)
 					}
 
+					if tc.OutPrefix != "" && !strings.HasPrefix(stdout, tc.OutPrefix) {
+						t.Errorf("stdout:\ngot:  %q\nwant prefix: %q", stdout, tc.OutPrefix)
+					}
+
 					if tc.Err != "" && stderr != tc.Err {
 						t.Errorf("stderr:\ngot:  %q\nwant: %q", stderr, tc.Err)
 					}
@@ -254,19 +259,6 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 				})
 			}
 		})
-	}
-}
-
-func TestE2E_Version(t *testing.T) {
-	env := setupTestEnv(t)
-	t.Cleanup(func() { env.cleanup(t) })
-
-	stdout, _, code := env.runCLI("", "", nil, "version")
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	if !strings.HasPrefix(stdout, "opcli ") {
-		t.Errorf("expected output to start with 'opcli ', got %q", stdout)
 	}
 }
 
