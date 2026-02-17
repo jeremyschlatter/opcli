@@ -418,11 +418,11 @@ func cmdSignin(accountFlag string) error {
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
-	vk, err := newVaultKeychain(password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID, dbAccount.AccountType)
+	vk, err := newVaultKeychain(db, password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID, dbAccount.AccountType)
 	if err != nil {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
-	vk.Close()
+	_ = vk // only used to verify credentials; db closed by defer
 
 	// Store in keychain
 	if err := StoreCredentials(dbAccount.AccountUUID, secretKey, password, shorthand, account.UserEmail, account.SignInURL); err != nil {
@@ -498,19 +498,11 @@ type VaultKeychain struct {
 	vaultKeysMu     sync.RWMutex               // protects vaultKeys for concurrent access
 }
 
-func newVaultKeychain(password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
-	return newVaultKeychainTimed(password, secretKey, email, accountUUID, accountID, accountType, nil)
+func newVaultKeychain(db *sql.DB, password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
+	return newVaultKeychainTimed(db, password, secretKey, email, accountUUID, accountID, accountType, nil)
 }
 
-func newVaultKeychainTimed(password, secretKey, email, accountUUID string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
-	db, err := openDB()
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		t.mark("  open DB (keychain)")
-	}
-
+func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
 	vk := &VaultKeychain{
 		db:            db,
 		accountID:     accountID,
@@ -897,21 +889,15 @@ func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
 }
 
 func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error) {
-	// Start DB query in background (pays cold-start cost in parallel with keychain)
+	// Start DB open in background (pays cold-start cost in parallel with keychain)
 	type dbResult struct {
-		accounts []AccountInfo
-		err      error
+		db  *sql.DB
+		err error
 	}
 	dbCh := make(chan dbResult, 1)
 	go func() {
 		db, err := openDB()
-		if err != nil {
-			dbCh <- dbResult{err: err}
-			return
-		}
-		accounts, err := getAccounts(db)
-		db.Close()
-		dbCh <- dbResult{accounts: accounts, err: err}
+		dbCh <- dbResult{db: db, err: err}
 	}()
 
 	// Meanwhile, do keychain operations (pays keychain cold-start cost)
@@ -948,13 +934,23 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 	if dbRes.err != nil {
 		return nil, dbRes.err
 	}
+	db := dbRes.db
 	if t != nil {
-		t.mark("get accounts (parallel)")
+		t.mark("open DB (parallel)")
+	}
+
+	accounts, err := getAccounts(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if t != nil {
+		t.mark("get accounts")
 	}
 
 	var accountID int64
 	var accountType string
-	for _, a := range dbRes.accounts {
+	for _, a := range accounts {
 		if a.AccountUUID == accountUUID {
 			accountID = a.ID
 			accountType = a.AccountType
@@ -962,12 +958,14 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		}
 	}
 	if accountID == 0 {
+		db.Close()
 		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
 	}
 
 	// Initialize keychain
-	vk, err := newVaultKeychainTimed(password, secretKey, storedAcct.Email, accountUUID, accountID, accountType, t)
+	vk, err := newVaultKeychainTimed(db, password, secretKey, storedAcct.Email, accountUUID, accountID, accountType, t)
 	if err != nil {
+		db.Close()
 		return nil, err
 	}
 	if t != nil {
