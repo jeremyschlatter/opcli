@@ -81,14 +81,7 @@ func openDB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	firstNeeded := -1
-	for i, m := range migrations.All {
-		if m.Version > version {
-			firstNeeded = i
-			break
-		}
-	}
-	if firstNeeded < 0 {
+	if version >= len(migrations.All)-1 {
 		return db, nil // fast path: no migrations
 	}
 
@@ -102,13 +95,16 @@ func openDB() (*sql.DB, error) {
 	db.Close()
 	logQueryTime("backupToMemory", t0)
 
-	for _, m := range migrations.All[firstNeeded:] {
-		t0 = time.Now()
-		if err := migrations.Run(memDB, m); err != nil {
-			memDB.Close()
-			return nil, fmt.Errorf("migration v%d: %w", m.Version, err)
+	for v := version + 1; v < len(migrations.All); v++ {
+		if migrations.All[v] == nil {
+			continue
 		}
-		logQueryTime(fmt.Sprintf("migrate:v%d", m.Version), t0)
+		t0 = time.Now()
+		if err := migrations.All[v](memDB); err != nil {
+			memDB.Close()
+			return nil, fmt.Errorf("migration v%d: %w", v, err)
+		}
+		logQueryTime(fmt.Sprintf("migrate:v%d", v), t0)
 	}
 
 	// Drop orphaned indexes whose tables no longer exist.

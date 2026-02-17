@@ -7,7 +7,6 @@ import (
 	"embed"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -15,54 +14,53 @@ import (
 //go:embed sql/*.sql
 var sqlFiles embed.FS
 
-type Migration struct {
-	Version int
-	GoFunc  func(*sql.DB) error // if set, called instead of executing embedded SQL
-}
-
-// All is the ordered list of migrations (v1..v60), built at init time
-// by scanning embedded SQL files and merging in Go-only migrations.
-var All []Migration
+// All maps version numbers to migration functions. All[v] migrates the DB
+// to version v. Nil entries mean no migration exists for that version.
+// Indexed by version number, so All[0] is unused.
+var All []func(*sql.DB) error
 
 func init() {
-	// Scan embedded SQL files for versions.
 	entries, err := sqlFiles.ReadDir("sql")
 	if err != nil {
 		panic(fmt.Sprintf("migrations: read embedded sql dir: %v", err))
 	}
 	re := regexp.MustCompile(`^migration_(\d+)\.sql$`)
-	versions := map[int]bool{}
+
+	// Find max version across SQL files and Go migrations.
+	maxVersion := 0
 	for _, e := range entries {
 		if m := re.FindStringSubmatch(e.Name()); m != nil {
-			v, _ := strconv.Atoi(m[1])
-			versions[v] = true
+			if v, _ := strconv.Atoi(m[1]); v > maxVersion {
+				maxVersion = v
+			}
+		}
+	}
+	for v := range goMigrations {
+		if v > maxVersion {
+			maxVersion = v
 		}
 	}
 
-	// Merge in Go-only migration versions.
-	for v := range goMigrations {
-		versions[v] = true
+	All = make([]func(*sql.DB) error, maxVersion+1)
+
+	// SQL migrations.
+	for _, e := range entries {
+		if m := re.FindStringSubmatch(e.Name()); m != nil {
+			v, _ := strconv.Atoi(m[1])
+			All[v] = sqlRunner(v)
+		}
 	}
 
-	// Build sorted list.
-	var sorted_ []int
-	for v := range versions {
-		sorted_ = append(sorted_, v)
-	}
-	sort.Ints(sorted_)
-
-	All = make([]Migration, len(sorted_))
-	for i, v := range sorted_ {
-		All[i] = Migration{Version: v, GoFunc: goMigrations[v]}
+	// Go migrations override SQL where both exist.
+	for v, f := range goMigrations {
+		All[v] = f
 	}
 }
 
-// Run executes a single migration against the database.
-func Run(db *sql.DB, m Migration) error {
-	if m.GoFunc != nil {
-		return m.GoFunc(db)
+func sqlRunner(version int) func(*sql.DB) error {
+	return func(db *sql.DB) error {
+		return runSQL(db, version)
 	}
-	return runSQL(db, m.Version)
 }
 
 func runSQL(db *sql.DB, version int) error {
