@@ -12,14 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-)
 
-// Test credentials - deterministic for reproducibility
-const (
-	testSecretKey = "A3-TEST01-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
-	testPassword  = "test-password"
-	testEmail     = "test@example.com"
-	testAccountID = "test-account-uuid-1234"
+	"gopkg.in/yaml.v3"
 )
 
 // base64URLEncode encodes bytes to base64url without padding
@@ -156,18 +150,57 @@ type TestItem struct {
 	Fields map[string]string // field name -> value
 }
 
+// YAML schema for testdata/testdb.yaml
+type testDBYAML struct {
+	Credentials struct {
+		SecretKey   string `yaml:"secret_key"`
+		Password    string `yaml:"password"`
+		Email       string `yaml:"email"`
+		AccountUUID string `yaml:"account_uuid"`
+	} `yaml:"credentials"`
+	Vaults []struct {
+		Name  string `yaml:"name"`
+		Type  string `yaml:"type"`
+		Items []struct {
+			Title    string `yaml:"title"`
+			Fields   []struct {
+				Name  string `yaml:"name"`
+				Type  string `yaml:"type"`
+				Value string `yaml:"value"`
+			} `yaml:"fields"`
+			Sections []struct {
+				Name   string `yaml:"name"`
+				Title  string `yaml:"title"`
+				Fields []struct {
+					Name  string `yaml:"name"`
+					Type  string `yaml:"type"`
+					Value string `yaml:"value"`
+				} `yaml:"fields"`
+			} `yaml:"sections"`
+		} `yaml:"items"`
+	} `yaml:"vaults"`
+}
+
 // CreateTestDatabase creates a new test database with encrypted data
 func CreateTestDatabase(dir string) (*TestDatabase, error) {
+	// Read and parse YAML
+	yamlData, err := os.ReadFile("testdata/testdb.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read testdb.yaml: %w", err)
+	}
+	var spec testDBYAML
+	if err := yaml.Unmarshal(yamlData, &spec); err != nil {
+		return nil, fmt.Errorf("failed to parse testdb.yaml: %w", err)
+	}
+
 	dbPath := filepath.Join(dir, "test.sqlite")
 
-	// Create database
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
 	defer db.Close()
 
-	// Create schema
 	if err := createSchema(db); err != nil {
 		return nil, fmt.Errorf("failed to create schema: %w", err)
 	}
@@ -186,16 +219,17 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 	keysetUUID := "keyset-uuid-1234"
 
 	// Create account
+	creds := spec.Credentials
 	accountData := map[string]interface{}{
-		"account_uuid": testAccountID,
-		"user_email":   testEmail,
+		"account_uuid": creds.AccountUUID,
+		"user_email":   creds.Email,
 		"user_name":    "Test User",
 		"sign_in_url":  "https://test.1password.com",
 	}
 	accountJSON, _ := json.Marshal(accountData)
 
 	res, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
-		testAccountID, accountJSON)
+		creds.AccountUUID, accountJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert account: %w", err)
 	}
@@ -203,7 +237,7 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 
 	// Create keyset encrypted with PBES2
 	symKeyJWK := createSymmetricKeyJWK(symKey, keysetUUID)
-	encSymKey, err := createPBES2EncryptedData(symKeyJWK, testSecretKey, testPassword, testEmail)
+	encSymKey, err := createPBES2EncryptedData(symKeyJWK, creds.SecretKey, creds.Password, creds.Email)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt sym key: %w", err)
 	}
@@ -230,31 +264,41 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 
 	testDB := &TestDatabase{
 		Path:        dbPath,
-		AccountUUID: testAccountID,
+		AccountUUID: creds.AccountUUID,
 		AccountID:   accountDBID,
-		SecretKey:   testSecretKey,
-		Password:    testPassword,
-		Email:       testEmail,
+		SecretKey:   creds.SecretKey,
+		Password:    creds.Password,
+		Email:       creds.Email,
 		Vaults:      make(map[string]*TestVault),
 	}
 
-	// Create "Private" vault (type P for personal vault on Family account)
-	privateVault, err := createTestVault(db, accountDBID, "Private", "P", keysetUUID, symKey, &rsaKey.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Private vault: %w", err)
-	}
-	testDB.Vaults["Private"] = privateVault
+	// Create vaults and items from YAML
+	for _, vaultSpec := range spec.Vaults {
+		vault, err := createTestVault(db, accountDBID, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create vault %s: %w", vaultSpec.Name, err)
+		}
+		testDB.Vaults[vaultSpec.Name] = vault
 
-	// Create "Work" vault (type U for regular user vault)
-	workVault, err := createTestVault(db, accountDBID, "Work", "U", keysetUUID, symKey, &rsaKey.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Work vault: %w", err)
-	}
-	testDB.Vaults["Work"] = workVault
+		for _, itemSpec := range vaultSpec.Items {
+			var fields []Field
+			for _, f := range itemSpec.Fields {
+				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: f.Value})
+			}
 
-	// Add test items to Private vault
-	if err := addTestItems(db, privateVault); err != nil {
-		return nil, fmt.Errorf("failed to add test items: %w", err)
+			var sections []Section
+			for _, s := range itemSpec.Sections {
+				var sectionFields []Field
+				for _, f := range s.Fields {
+					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: f.Value})
+				}
+				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
+			}
+
+			if err := addTestItem(db, vault, itemSpec.Title, fields, sections); err != nil {
+				return nil, fmt.Errorf("failed to add item %s: %w", itemSpec.Title, err)
+			}
+		}
 	}
 
 	return testDB, nil
@@ -369,58 +413,7 @@ func createTestVault(db *sql.DB, accountID int64, name, vaultType, keysetUUID st
 	}, nil
 }
 
-func addTestItems(db *sql.DB, vault *TestVault) error {
-	// Test Login item
-	loginFields := []Field{
-		{Name: "username", Type: "string", Value: "testuser"},
-		{Name: "password", Type: "concealed", Value: "secret123"},
-	}
-	if err := addTestItem(db, vault, "Test Login", loginFields); err != nil {
-		return err
-	}
-
-	// Test API Key item
-	apiFields := []Field{
-		{Name: "credential", Type: "concealed", Value: "api-key-12345"},
-	}
-	if err := addTestItem(db, vault, "Test API Key", apiFields); err != nil {
-		return err
-	}
-
-	// Test item with sections
-	sectionedFields := []Field{
-		{Name: "notes", Type: "string", Value: "top level note"},
-	}
-	sections := []Section{
-		{
-			Name:  "server",
-			Title: "Server Details",
-			Fields: []Field{
-				{T: "hostname", N: "hostname", K: "string", V: "example.com"},
-				{T: "port", N: "port", K: "string", V: "8080"},
-			},
-		},
-	}
-	if err := addTestItemWithSections(db, vault, "Test Sectioned", sectionedFields, sections); err != nil {
-		return err
-	}
-
-	// Test item with empty field value
-	emptyFields := []Field{
-		{Name: "empty", Type: "string", Value: ""},
-	}
-	if err := addTestItem(db, vault, "Test Empty", emptyFields); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field) error {
-	return addTestItemWithSections(db, vault, title, fields, nil)
-}
-
-func addTestItemWithSections(db *sql.DB, vault *TestVault, title string, fields []Field, sections []Section) error {
+func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field, sections []Section) error {
 	itemUUID := fmt.Sprintf("item-%s-uuid", title)
 
 	// Create overview
