@@ -3,6 +3,8 @@ credentials:
   password: test-password
   email: test@example.com
   account_uuid: test-account-uuid-1234
+  user_name: Test User
+  sign_in_url: https://test.1password.com
 
 vaults:
   - name: Private

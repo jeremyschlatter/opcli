@@ -157,13 +157,15 @@ type testDBYAML struct {
 		Password    string `yaml:"password"`
 		Email       string `yaml:"email"`
 		AccountUUID string `yaml:"account_uuid"`
+		UserName    string `yaml:"user_name"`
+		SignInURL   string `yaml:"sign_in_url"`
 	} `yaml:"credentials"`
 	Vaults []struct {
 		Name  string `yaml:"name"`
 		Type  string `yaml:"type"`
 		Items []struct {
-			Title    string `yaml:"title"`
-			Fields   []struct {
+			Title  string `yaml:"title"`
+			Fields []struct {
 				Name  string `yaml:"name"`
 				Type  string `yaml:"type"`
 				Value string `yaml:"value"`
@@ -220,13 +222,12 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 
 	// Create account
 	creds := spec.Credentials
-	accountData := map[string]interface{}{
+	accountJSON, _ := json.Marshal(map[string]interface{}{
 		"account_uuid": creds.AccountUUID,
 		"user_email":   creds.Email,
-		"user_name":    "Test User",
-		"sign_in_url":  "https://test.1password.com",
-	}
-	accountJSON, _ := json.Marshal(accountData)
+		"user_name":    creds.UserName,
+		"sign_in_url":  creds.SignInURL,
+	})
 
 	res, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
 		creds.AccountUUID, accountJSON)
