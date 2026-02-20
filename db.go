@@ -224,8 +224,10 @@ func maybeBackupDB(db *sql.DB) error {
 	date := time.Now().Format("2006-01-02")
 	backupPath := filepath.Join(backupDir, fmt.Sprintf("v%d-%s.sqlite3", version, date))
 
-	_, err = db.Exec("VACUUM INTO ?", backupPath)
-	return err
+	if _, err = db.Exec("VACUUM INTO ?", backupPath); err != nil {
+		return err
+	}
+	return os.Chmod(backupPath, 0600)
 }
 
 // AccountInfo holds basic info for account selection.
