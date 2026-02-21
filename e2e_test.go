@@ -48,7 +48,7 @@ type testEnv struct {
 	sessionKey string
 }
 
-func setupTestEnv(t *testing.T) *testEnv {
+func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	t.Helper()
 
 	os.Setenv(autoBackupDB, "")
@@ -66,7 +66,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	}
 
 	// Create test database
-	testDB, err := CreateTestDatabase(tmpDir)
+	testDB, err := CreateTestDatabase(tmpDir, fromV1)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to create test database: %v", err)
@@ -186,12 +186,17 @@ func loadTestCases(t *testing.T) map[string][]yamlTestCase {
 }
 
 func TestE2E(t *testing.T) {
-	env := setupTestEnv(t)
+	env := setupTestEnv(t, false)
 	t.Cleanup(func() { env.cleanup(t) })
 
-	allTests := loadTestCases(t)
+	runTestCases(t, env, loadTestCases(t))
+}
 
-	runTestCases(t, env, allTests)
+func TestE2E_Migrated(t *testing.T) {
+	env := setupTestEnv(t, true)
+	t.Cleanup(func() { env.cleanup(t) })
+
+	runTestCases(t, env, loadTestCases(t))
 }
 
 func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase) {

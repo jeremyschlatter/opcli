@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"opcli/migrations"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -183,8 +185,11 @@ type testDBYAML struct {
 	} `yaml:"vaults"`
 }
 
-// CreateTestDatabase creates a new test database with encrypted data
-func CreateTestDatabase(dir string) (*TestDatabase, error) {
+// CreateTestDatabase creates a new test database with encrypted data.
+// If fromV1 is true, the database starts at schema v1, has old-format keysets
+// in account_objects, gets migrated through v2-v5, then has test data inserted.
+// The CLI will then run migrations v6-v60 at runtime (including the v60 keyset migration).
+func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 	// Read and parse YAML
 	yamlData, err := os.ReadFile("testdata/testdb.yaml")
 	if err != nil {
@@ -203,10 +208,6 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 	}
 	defer db.Close()
 
-	if err := createSchema(db); err != nil {
-		return nil, fmt.Errorf("failed to create schema: %w", err)
-	}
-
 	// Generate keys
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -219,22 +220,14 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 	}
 
 	keysetUUID := "keyset-uuid-1234"
-
-	// Create account
 	creds := spec.Credentials
+
 	accountJSON, _ := json.Marshal(map[string]interface{}{
 		"account_uuid": creds.AccountUUID,
 		"user_email":   creds.Email,
 		"user_name":    creds.UserName,
 		"sign_in_url":  creds.SignInURL,
 	})
-
-	res, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
-		creds.AccountUUID, accountJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert account: %w", err)
-	}
-	accountDBID, _ := res.LastInsertId()
 
 	// Create keyset encrypted with PBES2
 	symKeyJWK := createSymmetricKeyJWK(symKey, keysetUUID)
@@ -249,18 +242,74 @@ func CreateTestDatabase(dir string) (*TestDatabase, error) {
 		return nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
 	}
 
-	keysetData := map[string]interface{}{
-		"sn":          1,
-		"encryptedBy": "mp",
-		"encSymKey":   encSymKey,
-		"encPriKey":   encPriKey,
-	}
-	keysetJSON, _ := json.Marshal(keysetData)
+	var accountDBID int64
 
-	_, err = db.Exec(`INSERT INTO objects_associated (key_name, type, data, associated_account) VALUES (?, 36, ?, ?)`,
-		keysetUUID, keysetJSON, accountDBID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert keyset: %w", err)
+	if fromV1 {
+		// V1 path: real schema, old-format keyset, migrations v1-v5
+		if err := migrations.All[1](db); err != nil {
+			return nil, fmt.Errorf("failed to apply v1 migration: %w", err)
+		}
+
+		// Insert account without account_uuid column (v2 extracts it from JSON)
+		res, err := db.Exec(`INSERT INTO accounts (data) VALUES (?)`, accountJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert account: %w", err)
+		}
+		accountDBID, _ = res.LastInsertId()
+
+		// Insert keyset in old format: snake_case keys, JSON-string-encoded encrypted data
+		encSymKeyJSON, _ := json.Marshal(encSymKey)
+		encPriKeyJSON, _ := json.Marshal(encPriKey)
+		keysetData := map[string]interface{}{
+			"sn":           1,
+			"encrypted_by": "mp",
+			"enc_sym_key":  string(encSymKeyJSON),
+			"enc_pri_key":  string(encPriKeyJSON),
+		}
+		keysetJSON, _ := json.Marshal(keysetData)
+
+		_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'keyset', ?)`,
+			accountDBID, keysetUUID, keysetJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert keyset: %w", err)
+		}
+
+		// Run migrations v2-v5
+		for v := 2; v <= 5; v++ {
+			if migrations.All[v] != nil {
+				if err := migrations.All[v](db); err != nil {
+					return nil, fmt.Errorf("setup migration v%d: %w", v, err)
+				}
+			}
+		}
+
+		// Leave DB at version 5 (migrations already set this)
+	} else {
+		// Simplified schema path (v60)
+		if err := createSchema(db); err != nil {
+			return nil, fmt.Errorf("failed to create schema: %w", err)
+		}
+
+		res, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
+			creds.AccountUUID, accountJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert account: %w", err)
+		}
+		accountDBID, _ = res.LastInsertId()
+
+		keysetData := map[string]interface{}{
+			"sn":          1,
+			"encryptedBy": "mp",
+			"encSymKey":   encSymKey,
+			"encPriKey":   encPriKey,
+		}
+		keysetJSON, _ := json.Marshal(keysetData)
+
+		_, err = db.Exec(`INSERT INTO objects_associated (key_name, type, data, associated_account) VALUES (?, 36, ?, ?)`,
+			keysetUUID, keysetJSON, accountDBID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert keyset: %w", err)
+		}
 	}
 
 	testDB := &TestDatabase{
@@ -317,6 +366,7 @@ func createSchema(db *sql.DB) error {
 		CREATE TABLE accounts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account_uuid TEXT NOT NULL UNIQUE,
+			local_version INTEGER NOT NULL DEFAULT 0,
 			data TEXT NOT NULL
 		);
 
@@ -343,9 +393,16 @@ func createSchema(db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uuid TEXT NOT NULL,
 			vault_id INTEGER NOT NULL,
-			template_uuid TEXT,
-			enc_overview TEXT NOT NULL,
-			trashed INTEGER DEFAULT 0
+			created_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			template_uuid TEXT NOT NULL DEFAULT '',
+			changer_uuid TEXT NOT NULL DEFAULT '',
+			favorite INTEGER NOT NULL DEFAULT 0,
+			trashed INTEGER NOT NULL DEFAULT 0,
+			version INTEGER NOT NULL DEFAULT 0,
+			local_edit_count INTEGER NOT NULL DEFAULT 0,
+			rejection_reason INTEGER NOT NULL DEFAULT 0,
+			enc_overview TEXT NOT NULL
 		);
 
 		CREATE TABLE item_details (
@@ -440,7 +497,7 @@ func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field, sec
 	encOverviewJSON, _ := json.Marshal(encOverview)
 	encDetailsJSON, _ := json.Marshal(encDetails)
 
-	res, err := db.Exec(`INSERT INTO item_overviews (uuid, vault_id, template_uuid, enc_overview) VALUES (?, ?, '', ?)`,
+	res, err := db.Exec(`INSERT INTO item_overviews (uuid, vault_id, created_at, updated_at, template_uuid, changer_uuid, favorite, trashed, version, local_edit_count, rejection_reason, enc_overview) VALUES (?, ?, 0, 0, '', '', 0, 0, 0, 0, 0, ?)`,
 		itemUUID, vault.ID, encOverviewJSON)
 	if err != nil {
 		return err
