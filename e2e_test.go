@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -197,6 +198,30 @@ func TestE2E_Migrated(t *testing.T) {
 	t.Cleanup(func() { env.cleanup(t) })
 
 	runTestCases(t, env, loadTestCases(t))
+}
+
+func TestE2E_UnsupportedDBVersion(t *testing.T) {
+	env := setupTestEnv(t, true)
+	t.Cleanup(func() { env.cleanup(t) })
+
+	// Downgrade the DB to version 4 (unsupported)
+	db, err := sql.Open("sqlite3", env.testDB.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("UPDATE config SET value = 4 WHERE name = 'version'")
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := env.runCLI("", "", nil, "read", "op://Private/MyLogin/password")
+	if code == 0 {
+		t.Error("expected non-zero exit code")
+	}
+	if !strings.Contains(stderr, "unsupported database version 4") {
+		t.Errorf("expected unsupported version error, got: %s", stderr)
+	}
 }
 
 func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase) {

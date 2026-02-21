@@ -81,6 +81,11 @@ func openDB() (*sql.DB, error) {
 		return nil, err
 	}
 
+	if version <= 4 {
+		db.Close()
+		return nil, fmt.Errorf("unsupported database version %d (need version 5 or later)", version)
+	}
+
 	if version >= len(migrations.All)-1 {
 		return db, nil // fast path: no migrations
 	}
