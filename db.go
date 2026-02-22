@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -202,9 +204,13 @@ func getDBVersion(db *sql.DB) (int, error) {
 	return version, nil
 }
 
-// maybeBackupDB checks if a versioned backup exists for the current schema version,
-// and creates one if not. Returns nil if a backup already existed.
+// maybeBackupDB keeps two backups per schema version: the first one we ever saw,
+// and the most recent one. This way when 1Password migrates the schema, we have a
+// very recent capture of the previous version for diffing.
 func maybeBackupDB(db *sql.DB) error {
+	if os.Getenv("OPCLI_DB_PATH") != "" {
+		return nil // don't back up overridden databases
+	}
 	version, err := getDBVersion(db)
 	if err != nil {
 		return err
@@ -220,19 +226,24 @@ func maybeBackupDB(db *sql.DB) error {
 		return err
 	}
 
-	// Check if a backup for this version already exists
-	matches, _ := filepath.Glob(filepath.Join(backupDir, fmt.Sprintf("v%d-*.sqlite3", version)))
-	if len(matches) > 0 {
-		return nil
+	firstPath := filepath.Join(backupDir, fmt.Sprintf("v%d-first.sqlite3", version))
+	latestPath := filepath.Join(backupDir, fmt.Sprintf("v%d-latest.sqlite3", version))
+
+	// If we've never seen this version, create the "first" backup.
+	if _, err := os.Stat(firstPath); errors.Is(err, fs.ErrNotExist) {
+		if _, err = db.Exec("VACUUM INTO ?", firstPath); err != nil {
+			return err
+		}
+		return os.Chmod(firstPath, 0600)
 	}
 
-	date := time.Now().Format("2006-01-02")
-	backupPath := filepath.Join(backupDir, fmt.Sprintf("v%d-%s.sqlite3", version, date))
-
-	if _, err = db.Exec("VACUUM INTO ?", backupPath); err != nil {
+	// Otherwise, update the "latest" backup.
+	// Remove first so VACUUM INTO doesn't fail on existing file.
+	os.Remove(latestPath)
+	if _, err = db.Exec("VACUUM INTO ?", latestPath); err != nil {
 		return err
 	}
-	return os.Chmod(backupPath, 0600)
+	return os.Chmod(latestPath, 0600)
 }
 
 // AccountInfo holds basic info for account selection.
