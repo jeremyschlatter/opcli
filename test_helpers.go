@@ -19,18 +19,17 @@ func init() {
 // This is only available in test builds.
 func cmdTestStoreCredentials() error {
 	accountUUID := os.Getenv("OPCLI_TEST_ACCOUNT_UUID")
-	secretKey := os.Getenv("OPCLI_TEST_SECRET_KEY")
 	password := os.Getenv("OPCLI_TEST_PASSWORD")
 	email := os.Getenv("OPCLI_TEST_EMAIL")
 
-	if accountUUID == "" || secretKey == "" || password == "" {
-		return fmt.Errorf("OPCLI_TEST_ACCOUNT_UUID, OPCLI_TEST_SECRET_KEY, OPCLI_TEST_PASSWORD required")
+	if accountUUID == "" || password == "" {
+		return fmt.Errorf("OPCLI_TEST_ACCOUNT_UUID, OPCLI_TEST_PASSWORD required")
 	}
 	if email == "" {
 		email = "test@example.com"
 	}
 
-	return StoreCredentials(accountUUID, secretKey, password, "test", email, "https://test.1password.com")
+	return StoreCredentials(accountUUID, password, "test", email, "https://test.1password.com")
 }
 
 // cmdTestDeleteCredentials deletes test credentials from the keychain.

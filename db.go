@@ -304,6 +304,22 @@ func getAccount(db *sql.DB, accountUUID string) (*Account, error) {
 	return &account, nil
 }
 
+// AgileBits does not publicly document the algorithm for de-obfuscating the Secret Key.
+// We lightly obfuscate our source code for it out of respect for that.
+//go:generate sh -c "base64 -d < obfuscation.b64 | gunzip > obfuscation.go"
+
+// getSecretKeyFromDB reads and deobfuscates the secret key from the database for an account.
+func getSecretKeyFromDB(db *sql.DB, accountUUID string) (string, error) {
+	account, err := getAccount(db, accountUUID)
+	if err != nil {
+		return "", err
+	}
+	if account.SignInProvider.SecretKey == "" {
+		return "", fmt.Errorf("no secret key in database for account %s", accountUUID)
+	}
+	return deobfuscateSecretKey(account.SignInProvider.SecretKey)
+}
+
 // getAccountIDByUUID gets the internal account ID from UUID.
 func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
 	var id int64
@@ -316,7 +332,7 @@ func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
 	return id, nil
 }
 
-// getPrimaryKeyset retrieves the primary keyset (encrypted by master password) for an account.
+// getPrimaryKeyset retrieves the primary keyset (encrypted by account password) for an account.
 func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 	var keyName string
 	var data []byte

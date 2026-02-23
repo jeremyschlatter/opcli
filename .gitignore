@@ -3,6 +3,8 @@ opcli
 *.o
 *.a
 
+obfuscation.go
+
 # Test artifacts
 opcli-test
 

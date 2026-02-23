@@ -90,7 +90,6 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 		"OPCLI_DB_PATH="+testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+dataDir,
 		"OPCLI_TEST_ACCOUNT_UUID="+testDB.AccountUUID,
-		"OPCLI_TEST_SECRET_KEY="+testDB.SecretKey,
 		"OPCLI_TEST_PASSWORD="+testDB.Password,
 		"OPCLI_TEST_EMAIL="+testDB.Email,
 	)

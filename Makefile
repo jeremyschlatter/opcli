@@ -30,15 +30,21 @@ libtouchid_stub.a: touchid_stub.m
 
 # Build Go binary (requires libtouchid.a)
 opcli: libtouchid.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
+	go generate
 	go build -ldflags "-X main.Version=$(VERSION)" -o opcli .
+	@rm -f obfuscation.go
 
 # Build test binary with stubbed TouchID
 opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
+	go generate
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
+	@rm -f obfuscation.go
 
 # Run e2e tests
 test: libtouchid.a
+	go generate
 	go test ./...
+	@rm -f obfuscation.go
 
 # Sign the binary (required for Touch ID and Keychain ACL)
 sign: opcli

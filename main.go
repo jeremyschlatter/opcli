@@ -398,17 +398,14 @@ func cmdSignin(accountFlag string) error {
 	shorthand := ExtractShorthand(account.SignInURL)
 	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, shorthand)
 
-	// Get secret key
-	fmt.Fprint(os.Stderr, "Enter Secret Key (A3-XXXXX-...): ")
-	skBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	// Get secret key from database
+	secretKey, err := getSecretKeyFromDB(db, dbAccount.AccountUUID)
 	if err != nil {
-		return fmt.Errorf("failed to read secret key: %w", err)
+		return fmt.Errorf("failed to read secret key from database: %w", err)
 	}
-	fmt.Fprintln(os.Stderr)
-	secretKey := strings.TrimSpace(string(skBytes))
 
-	// Get master password
-	fmt.Fprint(os.Stderr, "Enter Master Password: ")
+	// Get account password
+	fmt.Fprint(os.Stderr, "Enter account password: ")
 	pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	if err != nil {
 		return fmt.Errorf("failed to read password: %w", err)
@@ -425,7 +422,7 @@ func cmdSignin(accountFlag string) error {
 	_ = vk // only used to verify credentials; db closed by defer
 
 	// Store in keychain
-	if err := StoreCredentials(dbAccount.AccountUUID, secretKey, password, shorthand, account.UserEmail, account.SignInURL); err != nil {
+	if err := StoreCredentials(dbAccount.AccountUUID, password, shorthand, account.UserEmail, account.SignInURL); err != nil {
 		return fmt.Errorf("failed to store credentials: %w", err)
 	}
 
@@ -458,20 +455,20 @@ func cmdSignout(accountFlag string) error {
 	return nil
 }
 
-// getCredentials gets credentials for an account, using session-based auth if available.
-func getCredentials(accountUUID string) (password, secretKey string, err error) {
+// getCredentials gets the account password for an account, using session-based auth if available.
+func getCredentials(accountUUID string) (password string, err error) {
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
-	sk, pw, err := GetCredentials(accountUUID)
+	pw, err := GetPassword(accountUUID)
 	if err != nil {
-		return "", "", fmt.Errorf("no account configured (run 'opcli signin' first)")
+		return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
 	}
 
 	if session == nil {
 		// No valid session - require biometric auth
 		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
-			return "", "", fmt.Errorf("authentication failed: %w", err)
+			return "", fmt.Errorf("authentication failed: %w", err)
 		}
 
 		// Create session
@@ -481,7 +478,7 @@ func getCredentials(accountUUID string) (password, secretKey string, err error) 
 		}
 	}
 
-	return pw, sk, nil
+	return pw, nil
 }
 
 // VaultKeychain holds decrypted keys for accessing vault items
@@ -921,7 +918,7 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		t.mark("get stored accounts")
 	}
 
-	password, secretKey, err := getCredentials(accountUUID)
+	password, err := getCredentials(accountUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -960,6 +957,16 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 	if accountID == 0 {
 		db.Close()
 		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
+	}
+
+	// Read secret key from database
+	secretKey, err := getSecretKeyFromDB(db, accountUUID)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to read secret key from database: %w", err)
+	}
+	if t != nil {
+		t.mark("read secret key (DB)")
 	}
 
 	// Initialize keychain

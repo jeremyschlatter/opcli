@@ -10,7 +10,7 @@ A fast, local 1Password CLI alternative. Reads directly from 1Password's local S
 
 ## How it works
 
-1. Gets your Secret Key and Master Password from you, saves them in Keychain
+1. Gets your account password from you, saves it in Keychain
 2. Reads the local 1Password SQLite database
 3. Derives the Account Unlock Key using 2SKD (HKDF + PBKDF2)
 4. Decrypts the keyset chain (AES-256-GCM + RSA-OAEP)
@@ -60,9 +60,9 @@ opcli signout
 
 ### Touch ID
 
-We unfortunately cannot integrate with the 1Password Desktop App for account unlocking, so `opcli signin` will require you to enter both your 1Password Secret Key (from your Emergency Kit) and your Master Password.
+We unfortunately cannot integrate with the 1Password Desktop App for account unlocking, so `opcli signin` will require you to enter your account password.
 
-These credentials are stored in the macOS Keychain with an app-only ACL. After this, `opcli` will always use TouchID to authenticate you. If any other app tries to read these credentials from the Keychain, macOS will give you a Keychain password prompt:
+Your account password is stored in the macOS Keychain with an app-only ACL. After this, `opcli` will always use TouchID to authenticate you. If any other app tries to read your account password from the Keychain, macOS will give you a Keychain password prompt:
 
 > `app` wants to use your confidential information stored in "opcli credentials" in your keychain.
 
@@ -81,7 +81,6 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 - macOS
 - 1Password 8 desktop app installed (creates the local database)
-- Your 1Password Secret Key (from your Emergency Kit)
 
 ## Limitations
 
@@ -92,7 +91,7 @@ This mirrors the UX of the official `op` CLI's desktop app integration.
 
 The official `op` CLI can avoid password prompts by integrating with the 1Password desktop app.
 
-Unfortunately for us, but fortunately for 1Password security in general, the desktop app requires a code signature from Agile Bits before accepting a connection from the CLI. If `opcli` does extremely well, maybe we can get Agile Bits to adopt it some day. Until then, we're stuck with managing the master password ourselves.
+Unfortunately for us, but fortunately for 1Password security in general, the desktop app requires a code signature from Agile Bits before accepting a connection from the CLI. If `opcli` does extremely well, maybe we can get Agile Bits to adopt it some day. Until then, we're stuck with managing the account password ourselves.
 
 ## License
 

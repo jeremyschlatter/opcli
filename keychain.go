@@ -175,6 +175,7 @@ import (
 var keychainService = "opcli"
 
 const keychainCredentials = "credentials"
+
 // CredentialStore holds all account credentials in a single keychain entry.
 type CredentialStore struct {
 	Accounts map[string]*StoredAccount `json:"accounts"` // keyed by account UUID
@@ -183,7 +184,7 @@ type CredentialStore struct {
 
 // StoredAccount holds credentials for a single account.
 type StoredAccount struct {
-	SecretKey string `json:"secret_key"`
+	SecretKey string `json:"secret_key,omitempty"` // legacy; now read from 1Password DB
 	Password  string `json:"password"`
 	Shorthand string `json:"shorthand"`
 	Email     string `json:"email"`
@@ -211,7 +212,6 @@ func keychainSet(account, password string) error {
 	}
 	return nil
 }
-
 
 // keychainGet retrieves a value from the keychain
 func keychainGet(account string) (string, error) {
@@ -336,15 +336,14 @@ func saveCredentialStore(store *CredentialStore) error {
 
 // StoreCredentials stores credentials for an account.
 // Sets this account as default if it's the first or only account.
-func StoreCredentials(accountUUID, secretKey, masterPassword, shorthand, email, signInURL string) error {
+func StoreCredentials(accountUUID, accountPassword, shorthand, email, signInURL string) error {
 	store, err := loadCredentialStore()
 	if err != nil {
 		return err
 	}
 
 	store.Accounts[accountUUID] = &StoredAccount{
-		SecretKey: secretKey,
-		Password:  masterPassword,
+		Password:  accountPassword,
 		Shorthand: shorthand,
 		Email:     email,
 		URL:       signInURL,
@@ -358,19 +357,19 @@ func StoreCredentials(accountUUID, secretKey, masterPassword, shorthand, email, 
 	return saveCredentialStore(store)
 }
 
-// GetCredentials retrieves credentials for an account by UUID.
-func GetCredentials(accountUUID string) (secretKey, masterPassword string, err error) {
+// GetPassword retrieves the account password for an account by UUID.
+func GetPassword(accountUUID string) (string, error) {
 	store, err := loadCredentialStore()
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	acct, ok := store.Accounts[accountUUID]
 	if !ok {
-		return "", "", fmt.Errorf("account not found: %s", accountUUID)
+		return "", fmt.Errorf("account not found: %s", accountUUID)
 	}
 
-	return acct.SecretKey, acct.Password, nil
+	return acct.Password, nil
 }
 
 // GetStoredAccounts returns all stored accounts.

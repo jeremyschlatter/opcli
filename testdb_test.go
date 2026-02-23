@@ -227,6 +227,10 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		"user_email":   creds.Email,
 		"user_name":    creds.UserName,
 		"sign_in_url":  creds.SignInURL,
+		"sign_in_provider": map[string]interface{}{
+			"type":       "sk",
+			"secret_key": obfuscateSecretKey(creds.SecretKey),
+		},
 	})
 
 	// Create keyset encrypted with PBES2
