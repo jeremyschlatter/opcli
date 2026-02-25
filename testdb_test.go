@@ -170,7 +170,7 @@ type testDBYAML struct {
 			Fields []struct {
 				Name  string `yaml:"name"`
 				Type  string `yaml:"type"`
-				Value string `yaml:"value"`
+				Value any    `yaml:"value"`
 			} `yaml:"fields"`
 			Sections []struct {
 				Name   string `yaml:"name"`
@@ -178,7 +178,7 @@ type testDBYAML struct {
 				Fields []struct {
 					Name  string `yaml:"name"`
 					Type  string `yaml:"type"`
-					Value string `yaml:"value"`
+					Value any    `yaml:"value"`
 				} `yaml:"fields"`
 			} `yaml:"sections"`
 		} `yaml:"items"`
@@ -337,14 +337,15 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		for _, itemSpec := range vaultSpec.Items {
 			var fields []Field
 			for _, f := range itemSpec.Fields {
-				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: f.Value})
+				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: fmt.Sprintf("%v", f.Value)})
 			}
 
 			var sections []Section
 			for _, s := range itemSpec.Sections {
 				var sectionFields []Field
 				for _, f := range s.Fields {
-					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: f.Value})
+					v, _ := json.Marshal(f.Value)
+					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: v})
 				}
 				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
 			}

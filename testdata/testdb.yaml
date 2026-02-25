@@ -43,5 +43,20 @@ vaults:
           - name: empty
             type: string
             value: ""
+      - title: Test Object Field
+        sections:
+          - name: tokens
+            title: Tokens
+            fields:
+              - name: example
+                type: string
+                value: example-token-value
+              - name: sign in with
+                type: ssoLogin
+                value:
+                  provider: google
+                  item:
+                    vaultUuid: "fake-vault-uuid-1234"
+                    itemUuid: "fake-item-uuid-5678"
   - name: Work
     type: U

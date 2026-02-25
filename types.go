@@ -1,5 +1,7 @@
 package main
 
+import "encoding/json"
+
 // EncryptedData represents the b5+jwk+json encrypted data format used by 1Password
 type EncryptedData struct {
 	Cty  string `json:"cty"`  // content type, e.g. "b5+jwk+json"
@@ -95,7 +97,7 @@ type Field struct {
 	T string `json:"t,omitempty"` // title/label
 	N string `json:"n,omitempty"` // internal name/id
 	K string `json:"k,omitempty"` // kind (string, concealed, etc.)
-	V string `json:"v,omitempty"` // value
+	V json.RawMessage `json:"v,omitempty"` // value (string, object, etc.)
 }
 
 // FieldLabel returns the user-visible label for the field.
@@ -122,8 +124,13 @@ func (f *Field) FieldID() string {
 
 // FieldValue returns the value of the field.
 func (f *Field) FieldValue() string {
-	if f.V != "" {
-		return f.V
+	if len(f.V) > 0 {
+		// If it's a JSON string, unquote it. Otherwise return the raw JSON.
+		var s string
+		if json.Unmarshal(f.V, &s) == nil {
+			return s
+		}
+		return string(f.V)
 	}
 	return f.Value
 }

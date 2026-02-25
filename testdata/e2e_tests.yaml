@@ -34,6 +34,10 @@ read:
     err: "Error: item not found: NoSuchItem\n"
     code: 1
 
+  - name: read field from item with object-valued fields
+    args: [read, "op://Private/Test Object Field/tokens/example"]
+    out: "example-token-value\n"
+
   - name: field not found
     args: [read, "op://Private/Test Login/nosuchfield"]
     err: "Error: field not found: nosuchfield\n"
