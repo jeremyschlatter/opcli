@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1486,8 +1487,33 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		defer stderrMask.Close()
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+
+	// Catch signals and forward them to the child. This prevents Go's
+	// runtime from killing us before the child finishes its cleanup.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range sigCh {
+			cmd.Process.Signal(sig)
+		}
+	}()
+
+	err := cmd.Wait()
+	signal.Stop(sigCh)
+	close(sigCh)
+
+	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				// Child died from a signal — re-raise so our parent sees it too.
+				sig := status.Signal()
+				signal.Reset(sig)
+				syscall.Kill(syscall.Getpid(), sig)
+				return 128 + int(sig), nil
+			}
 			return exitErr.ExitCode(), nil
 		}
 		return 0, err
