@@ -1535,11 +1535,16 @@ func parseEnvFile(path string, env map[string]string) (map[string]string, error)
 	return result, nil
 }
 
+type trieNode struct {
+	children map[byte]*trieNode
+}
+
 // maskingWriter replaces secret values with <concealed> in output.
 // It buffers data to handle secrets that might be split across Write calls.
 type maskingWriter struct {
 	w            io.Writer
 	replacer     *strings.Replacer
+	prefixTrie   *trieNode
 	maxSecretLen int
 	buf          []byte
 }
@@ -1547,17 +1552,26 @@ type maskingWriter struct {
 func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
 	var pairs []string
 	maxLen := 0
+	root := &trieNode{children: make(map[byte]*trieNode)}
 	for _, s := range secrets {
 		if s != "" {
 			pairs = append(pairs, s, "<concealed>")
 			if len(s) > maxLen {
 				maxLen = len(s)
 			}
+			node := root
+			for i := range len(s) {
+				if node.children[s[i]] == nil {
+					node.children[s[i]] = &trieNode{children: make(map[byte]*trieNode)}
+				}
+				node = node.children[s[i]]
+			}
 		}
 	}
 	return &maskingWriter{
 		w:            w,
 		replacer:     strings.NewReplacer(pairs...),
+		prefixTrie:   root,
 		maxSecretLen: maxLen,
 	}
 }
@@ -1570,8 +1584,26 @@ func (m *maskingWriter) Write(p []byte) (n int, err error) {
 	m.buf = append(m.buf, p...)
 	m.buf = []byte(m.replacer.Replace(string(m.buf)))
 
-	// Keep the last maxSecretLen-1 bytes (could be start of a secret)
-	safeLen := len(m.buf) - m.maxSecretLen + 1
+	// Only hold back trailing bytes that could be the start of a secret.
+	// Walk the trie for each suffix (longest first); stop at the first match.
+	holdBack := 0
+	maxCheck := m.maxSecretLen - 1
+	if maxCheck > len(m.buf) {
+		maxCheck = len(m.buf)
+	}
+	for suffixStart := len(m.buf) - maxCheck; suffixStart < len(m.buf) && holdBack == 0; suffixStart++ {
+		node := m.prefixTrie
+		for i := suffixStart; i < len(m.buf); i++ {
+			node = node.children[m.buf[i]]
+			if node == nil {
+				break
+			}
+		}
+		if node != nil {
+			holdBack = len(m.buf) - suffixStart
+		}
+	}
+	safeLen := len(m.buf) - holdBack
 	if safeLen <= 0 {
 		return len(p), nil
 	}
