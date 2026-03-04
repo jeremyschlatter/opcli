@@ -1370,7 +1370,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	var noMasking, tui bool
 	var cmdArgs []string
 
-	// Parse flags until we hit --
+	// Parse flags until we hit -- or a non-flag argument
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -1392,6 +1392,9 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			tui = true
 		} else if strings.HasPrefix(arg, "-") {
 			return 0, fmt.Errorf("unknown flag: %s", arg)
+		} else {
+			cmdArgs = args[i:]
+			break
 		}
 	}
 
