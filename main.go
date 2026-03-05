@@ -1568,7 +1568,7 @@ type trieNode struct {
 	children map[byte]*trieNode
 }
 
-// maskingWriter replaces secret values with <concealed> in output.
+// maskingWriter replaces secret values with <concealed by opcli> in output.
 // It buffers data to handle secrets that might be split across Write calls.
 type maskingWriter struct {
 	w            io.Writer
@@ -1584,7 +1584,7 @@ func newMaskingWriter(w io.Writer, secrets []string) *maskingWriter {
 	root := &trieNode{children: make(map[byte]*trieNode)}
 	for _, s := range secrets {
 		if s != "" {
-			pairs = append(pairs, s, "<concealed>")
+			pairs = append(pairs, s, "<concealed by opcli>")
 			if len(s) > maxLen {
 				maxLen = len(s)
 			}

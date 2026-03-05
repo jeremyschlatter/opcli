@@ -239,13 +239,13 @@ run:
     args: [run, --, sh, -c, "echo secret123"]
     env:
       SECRET: "op://Private/Test Login/password"
-    out: "<concealed>\n"
+    out: "<concealed by opcli>\n"
 
   - name: mask secret split across writes
     args: [run, --, sh, -c, "echo -n secre; sleep 0.01; echo t123"]
     env:
       SECRET: "op://Private/Test Login/password"
-    out: "<concealed>\n"
+    out: "<concealed by opcli>\n"
 
   - name: empty secret value does not panic
     args: [run, --, echo, hello]
@@ -264,13 +264,13 @@ run:
     env:
       PASS: "op://Private/Test Login/password"
       USER: "op://Private/Test Login/username"
-    out: "<concealed> and <concealed>\n"
+    out: "<concealed by opcli> and <concealed by opcli>\n"
 
   - name: mask secrets in stderr
     args: [run, --, sh, -c, "echo secret123 >&2"]
     env:
       SECRET: "op://Private/Test Login/password"
-    err: "<concealed>\n"
+    err: "<concealed by opcli>\n"
 
   # Error cases
   - name: vault not found
