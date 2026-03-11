@@ -3,7 +3,7 @@
     flake-utils.lib.eachDefaultSystem (system:
     with nixpkgs.legacyPackages.${system};
     {
-      devShell = mkShell {
+      devShells.default = mkShell {
         packages = [
           go
         ];
