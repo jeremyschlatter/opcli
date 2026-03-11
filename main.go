@@ -391,10 +391,6 @@ func cmdSignin(accountFlag string) error {
 	if err != nil {
 		return err
 	}
-	accountID, err := getAccountIDByUUID(db, dbAccount.AccountUUID)
-	if err != nil {
-		return err
-	}
 
 	shorthand := ExtractShorthand(account.SignInURL)
 	fmt.Fprintf(os.Stderr, "Signing in to: %s (%s)\n", account.UserEmail, shorthand)
@@ -416,7 +412,7 @@ func cmdSignin(accountFlag string) error {
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
-	vk, err := newVaultKeychain(db, password, secretKey, account.UserEmail, dbAccount.AccountUUID, accountID, dbAccount.AccountType)
+	vk, err := newVaultKeychain(db, password, secretKey, account.UserEmail, dbAccount.AccountUUID, dbAccount.AccountType)
 	if err != nil {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
@@ -485,7 +481,7 @@ func getCredentials(accountUUID string) (password string, err error) {
 // VaultKeychain holds decrypted keys for accessing vault items
 type VaultKeychain struct {
 	db              *sql.DB
-	accountID       int64                      // internal DB account ID
+	accountUUID     string                     // 1Password account UUID
 	accountType     string                     // I=Individual, F=Family, T=Teams, B=Business
 	primaryKeysetID string                     // UUID of the primary keyset
 	primarySymKey   []byte                     // Decrypted primary symmetric key
@@ -496,14 +492,14 @@ type VaultKeychain struct {
 	vaultKeysMu     sync.RWMutex               // protects vaultKeys for concurrent access
 }
 
-func newVaultKeychain(db *sql.DB, password, secretKey, email, accountUUID string, accountID int64, accountType string) (*VaultKeychain, error) {
-	return newVaultKeychainTimed(db, password, secretKey, email, accountUUID, accountID, accountType, nil)
+func newVaultKeychain(db *sql.DB, password, secretKey, email, accountUUID, accountType string) (*VaultKeychain, error) {
+	return newVaultKeychainTimed(db, password, secretKey, email, accountUUID, accountType, nil)
 }
 
-func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID string, accountID int64, accountType string, t *timer) (*VaultKeychain, error) {
+func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID, accountType string, t *timer) (*VaultKeychain, error) {
 	vk := &VaultKeychain{
 		db:            db,
-		accountID:     accountID,
+		accountUUID:   accountUUID,
 		accountType:   accountType,
 		keysetRSAKeys: make(map[string]*rsa.PrivateKey),
 		keysetSymKeys: make(map[string][]byte),
@@ -511,7 +507,7 @@ func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID s
 	}
 
 	// Get primary keyset
-	keyset, err := getPrimaryKeyset(db, accountID)
+	keyset, err := getPrimaryKeyset(db, accountUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get primary keyset: %w", err)
 	}
@@ -584,7 +580,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 	vk.keysetMu.RUnlock()
 
 	// Get the keyset (no lock needed for DB read)
-	keyset, err := getKeyset(vk.db, vk.accountID, keysetUUID)
+	keyset, err := getKeyset(vk.db, vk.accountUUID, keysetUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keyset %s: %w", keysetUUID, err)
 	}
@@ -648,30 +644,19 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 	vk.vaultKeysMu.RUnlock()
 
 	// Get vault data
-	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
+	vault, err := getVaultByUUID(vk.db, vk.accountUUID, vaultUUID)
 	if err != nil {
 		return nil, err
-	}
-
-	vault, err := getVaultByID(vk.db, vaultID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse encrypted vault key
-	var encVaultKey EncryptedData
-	if err := json.Unmarshal([]byte(vault.EncVaultKey), &encVaultKey); err != nil {
-		return nil, fmt.Errorf("failed to parse encrypted vault key: %w", err)
 	}
 
 	// Get the RSA key for the keyset that encrypted this vault key
-	rsaKey, err := vk.getKeysetRSAKey(encVaultKey.Kid)
+	rsaKey, err := vk.getKeysetRSAKey(vault.EncVaultKey.Kid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get keyset RSA key: %w", err)
 	}
 
 	// Decrypt vault key using RSA-OAEP
-	keyData, err := base64URLDecode(encVaultKey.Data)
+	keyData, err := base64URLDecode(vault.EncVaultKey.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode vault key data: %w", err)
 	}
@@ -737,17 +722,12 @@ func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedDa
 
 // decryptVaultName decrypts the vault attributes and returns the display name and raw name.
 func (vk *VaultKeychain) decryptVaultName(v *Vault) (displayName, rawName string, err error) {
-	var encAttrs EncryptedData
-	if err := json.Unmarshal([]byte(v.EncAttrs), &encAttrs); err != nil {
-		return "", "", fmt.Errorf("failed to parse vault attrs: %w", err)
-	}
-
 	key, err := vk.getVaultKey(v.VaultUUID)
 	if err != nil {
 		return "", "", err
 	}
 
-	attrsJSON, err := decryptEncryptedData(&encAttrs, key)
+	attrsJSON, err := decryptEncryptedData(&v.EncAttrs, key)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to decrypt vault attrs: %w", err)
 	}
@@ -768,7 +748,7 @@ func (vk *VaultKeychain) findVaultByName(vaultName string) (string, error) {
 }
 
 func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (string, error) {
-	vaults, err := getVaults(vk.db, vk.accountID)
+	vaults, err := getVaults(vk.db, vk.accountUUID)
 	if err != nil {
 		return "", err
 	}
@@ -826,25 +806,17 @@ func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (strin
 }
 
 // findItemByName finds an item in a vault by title or UUID.
-func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*ItemOverview, error) {
+func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*Item, error) {
 	return vk.findItemByNameTimed(vaultUUID, itemName, nil)
 }
 
-func (vk *VaultKeychain) findItemByNameTimed(vaultUUID, itemName string, t *timer) (*ItemOverview, error) {
-	vaultID, err := getVaultIDByUUID(vk.db, vk.accountID, vaultUUID)
+func (vk *VaultKeychain) findItemByNameTimed(vaultUUID, itemName string, t *timer) (*Item, error) {
+	items, err := getItems(vk.db, vk.accountUUID, vaultUUID)
 	if err != nil {
 		return nil, err
 	}
 	if t != nil {
-		t.mark("    getVaultIDByUUID")
-	}
-
-	items, err := getItemOverviews(vk.db, vaultID)
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		t.mark(fmt.Sprintf("    getItemOverviews (%d items)", len(items)))
+		t.mark(fmt.Sprintf("    getItems (%d items)", len(items)))
 	}
 
 	for i := range items {
@@ -946,16 +918,16 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 		t.mark("get accounts")
 	}
 
-	var accountID int64
 	var accountType string
+	var found bool
 	for _, a := range accounts {
 		if a.AccountUUID == accountUUID {
-			accountID = a.ID
 			accountType = a.AccountType
+			found = true
 			break
 		}
 	}
-	if accountID == 0 {
+	if !found {
 		db.Close()
 		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
 	}
@@ -971,7 +943,7 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 	}
 
 	// Initialize keychain
-	vk, err := newVaultKeychainTimed(db, password, secretKey, storedAcct.Email, accountUUID, accountID, accountType, t)
+	vk, err := newVaultKeychainTimed(db, password, secretKey, storedAcct.Email, accountUUID, accountType, t)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -1009,13 +981,7 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 	t.mark("find item")
 
-	detail, err := getItemDetail(vk.db, item.ID)
-	if err != nil {
-		return err
-	}
-	t.mark("get item detail (DB)")
-
-	decryptedItem, err := vk.decryptDetail(vaultUUID, &detail.EncDetails)
+	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
 	if err != nil {
 		return err
 	}
@@ -1158,7 +1124,7 @@ func cmdList(accountFlag string) error {
 	}
 	defer vk.Close()
 
-	vaults, err := getVaults(vk.db, vk.accountID)
+	vaults, err := getVaults(vk.db, vk.accountUUID)
 	if err != nil {
 		return err
 	}
@@ -1223,17 +1189,12 @@ func cmdGet(uri string, accountFlag string) error {
 		return err
 	}
 
-	detail, err := getItemDetail(vk.db, item.ID)
-	if err != nil {
-		return err
-	}
-
 	key, err := vk.getVaultKey(vaultUUID)
 	if err != nil {
 		return err
 	}
 
-	decrypted, err := decryptEncryptedData(&detail.EncDetails, key)
+	decrypted, err := decryptEncryptedData(&item.EncDetails, key)
 	if err != nil {
 		return err
 	}
@@ -1693,12 +1654,7 @@ func readSecret(vk *VaultKeychain, uri string) (string, error) {
 		return "", err
 	}
 
-	detail, err := getItemDetail(vk.db, item.ID)
-	if err != nil {
-		return "", err
-	}
-
-	decryptedItem, err := vk.decryptDetail(vaultUUID, &detail.EncDetails)
+	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
 	if err != nil {
 		return "", err
 	}

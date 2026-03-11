@@ -41,27 +41,21 @@ type Keyset struct {
 	EncryptedBy string        `json:"encryptedBy"` // "mp" for master password, or keyset UUID
 }
 
-// Vault represents a vault from account_objects
+// Vault represents a vault from the vaults table
 type Vault struct {
-	VaultUUID    string `json:"vault_uuid"`
-	VaultType    string `json:"vault_type"`
-	EncVaultKey  string `json:"enc_vault_key"`  // JSON-encoded EncryptedData
-	EncAttrs     string `json:"enc_attrs"`      // JSON-encoded EncryptedData
+	VaultUUID   string        // populated from vault_uuid column
+	VaultType   string        `json:"vault_type"`
+	EncVaultKey EncryptedData `json:"enc_vault_key"`
+	EncAttrs    EncryptedData `json:"enc_attrs"`
 }
 
-// ItemOverview contains the encrypted overview data for an item
-type ItemOverview struct {
-	ID           int64
+// Item contains both encrypted overview and detail data for an item
+type Item struct {
 	UUID         string
-	VaultID      int64
-	TemplateUUID string
-	EncOverview  EncryptedData
-}
-
-// ItemDetail contains the encrypted detail data for an item
-type ItemDetail struct {
-	ID         int64
-	EncDetails EncryptedData
+	VaultUUID    string
+	TemplateUUID string        // from data.category_uuid
+	EncOverview  EncryptedData // from data.overview
+	EncDetails   EncryptedData // from data.details
 }
 
 // DecryptedOverview is the decrypted item overview

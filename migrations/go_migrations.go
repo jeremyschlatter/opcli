@@ -20,6 +20,7 @@ var goMigrations = map[int]func(*sql.DB) error{
 	57: migrateV57Categories,
 	58: migrateV58EditingDrafts,
 	60: migrateV60Keysets,
+	61: migrateV61Tables,
 }
 
 func tableExists(db *sql.DB, name string) (bool, error) {
@@ -655,4 +656,343 @@ func migrateV60Keysets(db *sql.DB) error {
 
 	_, err = db.Exec(`UPDATE config SET value = '60' WHERE name = 'version'`)
 	return err
+}
+
+// migrateV61Tables restructures the database from integer-ID-based tables to UUID-based tables.
+// accounts: integer PK → account_uuid TEXT PK
+// account_objects → vaults: dedicated table, enc_vault_key/enc_attrs un-stringified
+// item_overviews + item_details → items: merged, data blob includes overview+details
+// objects_associated: integer refs → UUID refs
+func migrateV61Tables(db *sql.DB) error {
+	// Build account id → uuid mapping.
+	accountUUIDs := map[int64]string{}
+	{
+		rows, err := db.Query("SELECT id, account_uuid FROM accounts")
+		if err != nil {
+			return fmt.Errorf("v61: query accounts: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			var uuid string
+			if err := rows.Scan(&id, &uuid); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan account: %w", err)
+			}
+			accountUUIDs[id] = uuid
+		}
+		rows.Close()
+	}
+
+	// Build vault id → (account_uuid, vault_uuid) mapping.
+	type vaultRef struct {
+		accountUUID string
+		vaultUUID   string
+	}
+	vaultRefs := map[int64]vaultRef{}
+	{
+		rows, err := db.Query("SELECT id, account_id, json_extract(data, '$.vault_uuid') FROM account_objects WHERE object_type = 'vault'")
+		if err != nil {
+			return fmt.Errorf("v61: query vaults: %w", err)
+		}
+		for rows.Next() {
+			var id, accountID int64
+			var vaultUUID string
+			if err := rows.Scan(&id, &accountID, &vaultUUID); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan vault ref: %w", err)
+			}
+			vaultRefs[id] = vaultRef{accountUUIDs[accountID], vaultUUID}
+		}
+		rows.Close()
+	}
+
+	// Build item id → (account_uuid, vault_uuid, item_uuid) mapping.
+	type itemRef struct {
+		accountUUID string
+		vaultUUID   string
+		itemUUID    string
+	}
+	itemRefs := map[int64]itemRef{}
+	{
+		rows, err := db.Query("SELECT id, uuid, vault_id FROM item_overviews")
+		if err != nil {
+			return fmt.Errorf("v61: query item refs: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			var uuid string
+			var vaultID int64
+			if err := rows.Scan(&id, &uuid, &vaultID); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan item ref: %w", err)
+			}
+			vr := vaultRefs[vaultID]
+			itemRefs[id] = itemRef{vr.accountUUID, vr.vaultUUID, uuid}
+		}
+		rows.Close()
+	}
+
+	// --- Create new tables ---
+
+	if _, err := db.Exec(`CREATE TABLE accounts_v61 (
+		account_uuid TEXT PRIMARY KEY NOT NULL,
+		data BLOB NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("v61: create accounts_v61: %w", err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE vaults (
+		account_uuid TEXT NOT NULL,
+		vault_uuid TEXT NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY (account_uuid, vault_uuid),
+		FOREIGN KEY (account_uuid) REFERENCES accounts_v61(account_uuid) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("v61: create vaults: %w", err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE items (
+		account_uuid TEXT NOT NULL,
+		vault_uuid TEXT NOT NULL,
+		item_uuid TEXT NOT NULL,
+		local_edit_count INTEGER NOT NULL,
+		rejection_reason INTEGER NOT NULL,
+		version INTEGER NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY (account_uuid, vault_uuid, item_uuid),
+		FOREIGN KEY (account_uuid, vault_uuid) REFERENCES vaults(account_uuid, vault_uuid) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("v61: create items: %w", err)
+	}
+
+	if _, err := db.Exec(`CREATE TABLE objects_associated_v61 (
+		type INT NOT NULL,
+		account_uuid TEXT NOT NULL,
+		key_name TEXT NOT NULL,
+		data BLOB NOT NULL,
+		vault_uuid TEXT,
+		item_uuid TEXT,
+		PRIMARY KEY (type, account_uuid, key_name),
+		CHECK (
+			(vault_uuid IS NULL AND item_uuid IS NULL)
+			OR
+			(vault_uuid IS NOT NULL AND item_uuid IS NOT NULL)
+		),
+		FOREIGN KEY (account_uuid) REFERENCES accounts_v61(account_uuid) ON DELETE CASCADE
+	)`); err != nil {
+		return fmt.Errorf("v61: create objects_associated_v61: %w", err)
+	}
+
+	// --- Migrate accounts ---
+	if _, err := db.Exec("INSERT INTO accounts_v61 (account_uuid, data) SELECT account_uuid, data FROM accounts"); err != nil {
+		return fmt.Errorf("v61: migrate accounts: %w", err)
+	}
+
+	// --- Migrate vaults ---
+	{
+		rows, err := db.Query("SELECT account_id, data FROM account_objects WHERE object_type = 'vault'")
+		if err != nil {
+			return fmt.Errorf("v61: query vault data: %w", err)
+		}
+		var vaultRows []struct {
+			accountID int64
+			data      []byte
+		}
+		for rows.Next() {
+			var accountID int64
+			var data []byte
+			if err := rows.Scan(&accountID, &data); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan vault: %w", err)
+			}
+			vaultRows = append(vaultRows, struct {
+				accountID int64
+				data      []byte
+			}{accountID, data})
+		}
+		rows.Close()
+
+		for _, vr := range vaultRows {
+			accountUUID := accountUUIDs[vr.accountID]
+
+			// Transform vault data: remove vault_uuid, un-stringify enc_vault_key and enc_attrs
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(vr.data, &raw); err != nil {
+				return fmt.Errorf("v61: parse vault data: %w", err)
+			}
+
+			var vaultUUID string
+			json.Unmarshal(raw["vault_uuid"], &vaultUUID)
+			delete(raw, "vault_uuid")
+
+			// Un-stringify enc_vault_key and enc_attrs (JSON string → embedded object)
+			for _, field := range []string{"enc_vault_key", "enc_attrs"} {
+				if val, ok := raw[field]; ok {
+					var jsonStr string
+					if json.Unmarshal(val, &jsonStr) == nil {
+						// It's a JSON string containing JSON — unwrap it
+						raw[field] = json.RawMessage(jsonStr)
+					}
+				}
+			}
+
+			newData, err := json.Marshal(raw)
+			if err != nil {
+				return fmt.Errorf("v61: marshal vault data: %w", err)
+			}
+
+			if _, err := db.Exec("INSERT INTO vaults (account_uuid, vault_uuid, data) VALUES (?, ?, ?)",
+				accountUUID, vaultUUID, newData); err != nil {
+				return fmt.Errorf("v61: insert vault: %w", err)
+			}
+		}
+	}
+
+	// --- Migrate items ---
+	{
+		rows, err := db.Query(`
+			SELECT o.vault_id, o.uuid, o.created_at, o.updated_at, o.template_uuid,
+			       o.changer_uuid, o.favorite, o.trashed, o.version,
+			       o.local_edit_count, o.rejection_reason, o.enc_overview, o.validated,
+			       d.enc_details
+			FROM item_overviews o
+			INNER JOIN item_details d ON d.id = o.id
+		`)
+		if err != nil {
+			return fmt.Errorf("v61: query items: %w", err)
+		}
+
+		type itemRow struct {
+			vaultID         int64
+			uuid            string
+			createdAt       int64
+			updatedAt       int64
+			templateUUID    string
+			changerUUID     string
+			favorite        int
+			trashed         int
+			version         int
+			localEditCount  int
+			rejectionReason int
+			encOverview     []byte
+			validated       int
+			encDetails      []byte
+		}
+		var itemRows []itemRow
+		for rows.Next() {
+			var r itemRow
+			if err := rows.Scan(&r.vaultID, &r.uuid, &r.createdAt, &r.updatedAt,
+				&r.templateUUID, &r.changerUUID, &r.favorite, &r.trashed,
+				&r.version, &r.localEditCount, &r.rejectionReason,
+				&r.encOverview, &r.validated, &r.encDetails); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan item: %w", err)
+			}
+			itemRows = append(itemRows, r)
+		}
+		rows.Close()
+
+		for _, r := range itemRows {
+			vr := vaultRefs[r.vaultID]
+
+			// Parse enc_overview and enc_details as JSON objects
+			var overview, details json.RawMessage
+			if err := json.Unmarshal(r.encOverview, &overview); err != nil {
+				return fmt.Errorf("v61: parse enc_overview: %w", err)
+			}
+			if err := json.Unmarshal(r.encDetails, &details); err != nil {
+				return fmt.Errorf("v61: parse enc_details: %w", err)
+			}
+
+			state := 0
+			if r.trashed != 0 {
+				state = 1
+			}
+
+			data, _ := json.Marshal(map[string]any{
+				"category_uuid": r.templateUUID,
+				"changer_uuid":  r.changerUUID,
+				"created_at":    r.createdAt,
+				"updated_at":    r.updatedAt,
+				"overview":      overview,
+				"details":       details,
+				"is_favorite":   r.favorite != 0,
+				"state":         state,
+				"validated":     r.validated != 0,
+			})
+
+			if _, err := db.Exec(
+				"INSERT INTO items (account_uuid, vault_uuid, item_uuid, local_edit_count, rejection_reason, version, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				vr.accountUUID, vr.vaultUUID, r.uuid, r.localEditCount, r.rejectionReason, r.version, data,
+			); err != nil {
+				return fmt.Errorf("v61: insert item %s: %w", r.uuid, err)
+			}
+		}
+	}
+
+	// --- Migrate objects_associated ---
+	{
+		rows, err := db.Query("SELECT key_name, type, data, associated_item, associated_account FROM objects_associated")
+		if err != nil {
+			return fmt.Errorf("v61: query objects_associated: %w", err)
+		}
+
+		type oaRow struct {
+			keyName    string
+			objType    int
+			data       []byte
+			assocItem  sql.NullInt64
+			assocAcct  int64
+		}
+		var oaRows []oaRow
+		for rows.Next() {
+			var r oaRow
+			if err := rows.Scan(&r.keyName, &r.objType, &r.data, &r.assocItem, &r.assocAcct); err != nil {
+				rows.Close()
+				return fmt.Errorf("v61: scan objects_associated: %w", err)
+			}
+			oaRows = append(oaRows, r)
+		}
+		rows.Close()
+
+		for _, r := range oaRows {
+			accountUUID := accountUUIDs[r.assocAcct]
+			var vaultUUID, itemUUID sql.NullString
+			if r.assocItem.Valid {
+				if ir, ok := itemRefs[r.assocItem.Int64]; ok {
+					vaultUUID = sql.NullString{String: ir.vaultUUID, Valid: true}
+					itemUUID = sql.NullString{String: ir.itemUUID, Valid: true}
+				}
+			}
+
+			if _, err := db.Exec(
+				"INSERT INTO objects_associated_v61 (type, account_uuid, key_name, data, vault_uuid, item_uuid) VALUES (?, ?, ?, ?, ?, ?)",
+				r.objType, accountUUID, r.keyName, r.data, vaultUUID, itemUUID,
+			); err != nil {
+				return fmt.Errorf("v61: insert objects_associated %s (type %d): %w", r.keyName, r.objType, err)
+			}
+		}
+	}
+
+	// --- Drop old tables, rename new ones ---
+	for _, stmt := range []string{
+		"DROP TABLE IF EXISTS item_details",
+		"DROP TABLE IF EXISTS item_overviews",
+		"DROP TABLE IF EXISTS objects_associated",
+		"DROP TABLE IF EXISTS account_objects",
+		"DROP TABLE IF EXISTS accounts",
+		"DELETE FROM sqlite_sequence",
+		"ALTER TABLE accounts_v61 RENAME TO accounts",
+		"ALTER TABLE objects_associated_v61 RENAME TO objects_associated",
+		"CREATE INDEX items_rejection_reason ON items(rejection_reason) WHERE rejection_reason <> 0",
+		"CREATE INDEX items_local_edit_count ON items(local_edit_count) WHERE local_edit_count <> 0",
+		"CREATE INDEX items_version ON items(version) WHERE local_edit_count <> 0",
+		"UPDATE config SET value = '61' WHERE name = 'version'",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("v61: %s: %w", truncate(stmt, 40), err)
+		}
+	}
+
+	return nil
 }

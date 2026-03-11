@@ -93,6 +93,7 @@ Files: `migrations/resources_NNN.sql`
 | 58 | Migrate `editing_drafts` into `objects_associated` (Rust-based) |
 | 59 | Clear autofill data |
 | 60 | Migrate keysets from `account_objects` into `objects_associated` (Rust-based) |
+| 61 | Major restructuring: integer IDs → UUID PKs, `account_objects` → `vaults`, `item_overviews`+`item_details` → `items`, un-stringify encrypted data in vault JSON (Rust-based) |
 
 ### Resources DB
 
@@ -105,15 +106,14 @@ Files: `migrations/resources_NNN.sql`
 
 The dominant trend across v27–v60 is **table consolidation**: specialized tables (ssh_pubkeys, snippet_shortcuts, item_usage, collection_map, feature_flags, account_policies, developer_activity_log, etc.) are progressively migrated into the generic `objects_associated` / `objects_unassociated` key-value tables, distinguished by a `type` integer column.
 
-### Final schema (v60)
+### Final schema (v61)
 
-Only 7 tables remain:
-- `accounts` — account metadata (JSON blob + uuid)
-- `account_objects` — vaults and other per-account objects
+Only 6 tables remain:
+- `accounts` — account metadata (account_uuid TEXT PK)
+- `vaults` — vault data (account_uuid + vault_uuid composite PK)
+- `items` — encrypted item overview + details in single data blob (account_uuid + vault_uuid + item_uuid composite PK)
 - `config` — key-value config (including schema version)
-- `item_overviews` — encrypted item overviews (searchable metadata)
-- `item_details` — encrypted item details (full content)
-- `objects_associated` — generic typed KV store with account/item associations
+- `objects_associated` — generic typed KV store with UUID-based account/item associations
 - `objects_unassociated` — generic typed KV store without associations
 
 ## Skipped versions

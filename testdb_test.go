@@ -129,7 +129,6 @@ func createRSAPrivateKeyJWK(key *rsa.PrivateKey, kid string) []byte {
 type TestDatabase struct {
 	Path        string
 	AccountUUID string
-	AccountID   int64
 	SecretKey   string
 	Password    string
 	Email       string
@@ -137,17 +136,16 @@ type TestDatabase struct {
 }
 
 type TestVault struct {
-	UUID  string
-	ID    int64
-	Name  string
-	Type  string // P=Personal, U=User vault
-	Items map[string]*TestItem
-	key   []byte // vault encryption key (for adding items)
+	UUID   string
+	Name   string
+	Type   string // P=Personal, U=User vault
+	Items  map[string]*TestItem
+	key    []byte // vault encryption key (for adding items)
+	v5DBID int64  // only used in fromV1 path for old-schema item inserts
 }
 
 type TestItem struct {
 	UUID   string
-	ID     int64
 	Title  string
 	Fields map[string]string // field name -> value
 }
@@ -246,8 +244,6 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		return nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
 	}
 
-	var accountDBID int64
-
 	if fromV1 {
 		// V1 path: real schema, old-format keyset, migrations v1-v5
 		if err := migrations.All[1](db); err != nil {
@@ -255,11 +251,10 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		}
 
 		// Insert account without account_uuid column (v2 extracts it from JSON)
-		res, err := db.Exec(`INSERT INTO accounts (data) VALUES (?)`, accountJSON)
+		_, err := db.Exec(`INSERT INTO accounts (data) VALUES (?)`, accountJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert account: %w", err)
 		}
-		accountDBID, _ = res.LastInsertId()
 
 		// Insert keyset in old format: snake_case keys, JSON-string-encoded encrypted data
 		encSymKeyJSON, _ := json.Marshal(encSymKey)
@@ -272,8 +267,8 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		}
 		keysetJSON, _ := json.Marshal(keysetData)
 
-		_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'keyset', ?)`,
-			accountDBID, keysetUUID, keysetJSON)
+		_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (1, ?, 'keyset', ?)`,
+			keysetUUID, keysetJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert keyset: %w", err)
 		}
@@ -289,17 +284,16 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 
 		// Leave DB at version 5 (migrations already set this)
 	} else {
-		// Simplified schema path (v60)
+		// Simplified schema path (v61)
 		if err := createSchema(db); err != nil {
 			return nil, fmt.Errorf("failed to create schema: %w", err)
 		}
 
-		res, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
+		_, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
 			creds.AccountUUID, accountJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert account: %w", err)
 		}
-		accountDBID, _ = res.LastInsertId()
 
 		keysetData := map[string]interface{}{
 			"sn":          1,
@@ -309,8 +303,8 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 		}
 		keysetJSON, _ := json.Marshal(keysetData)
 
-		_, err = db.Exec(`INSERT INTO objects_associated (key_name, type, data, associated_account) VALUES (?, 36, ?, ?)`,
-			keysetUUID, keysetJSON, accountDBID)
+		_, err = db.Exec(`INSERT INTO objects_associated (type, account_uuid, key_name, data) VALUES (36, ?, ?, ?)`,
+			creds.AccountUUID, keysetUUID, keysetJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert keyset: %w", err)
 		}
@@ -319,7 +313,6 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 	testDB := &TestDatabase{
 		Path:        dbPath,
 		AccountUUID: creds.AccountUUID,
-		AccountID:   accountDBID,
 		SecretKey:   creds.SecretKey,
 		Password:    creds.Password,
 		Email:       creds.Email,
@@ -328,7 +321,13 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 
 	// Create vaults and items from YAML
 	for _, vaultSpec := range spec.Vaults {
-		vault, err := createTestVault(db, accountDBID, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
+		var vault *TestVault
+		var err error
+		if fromV1 {
+			vault, err = createTestVaultV5(db, 1, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
+		} else {
+			vault, err = createTestVault(db, creds.AccountUUID, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to create vault %s: %w", vaultSpec.Name, err)
 		}
@@ -350,7 +349,12 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
 			}
 
-			if err := addTestItem(db, vault, itemSpec.Title, fields, sections); err != nil {
+			if fromV1 {
+				err = addTestItemV5(db, vault, itemSpec.Title, fields, sections)
+			} else {
+				err = addTestItem(db, creds.AccountUUID, vault, itemSpec.Title, fields, sections)
+			}
+			if err != nil {
 				return nil, fmt.Errorf("failed to add item %s: %w", itemSpec.Title, err)
 			}
 		}
@@ -366,60 +370,56 @@ func createSchema(db *sql.DB) error {
 			value TEXT NOT NULL
 		);
 
-		INSERT INTO config (name, value) VALUES ('version', '60');
+		INSERT INTO config (name, value) VALUES ('version', '61');
 
 		CREATE TABLE accounts (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_uuid TEXT NOT NULL UNIQUE,
-			local_version INTEGER NOT NULL DEFAULT 0,
-			data TEXT NOT NULL
+			account_uuid TEXT PRIMARY KEY NOT NULL,
+			data BLOB NOT NULL
 		);
 
-		CREATE TABLE account_objects (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL,
-			uuid TEXT NOT NULL,
-			object_type TEXT NOT NULL,
-			data TEXT NOT NULL,
-			FOREIGN KEY (account_id) REFERENCES accounts(id)
+		CREATE TABLE vaults (
+			account_uuid TEXT NOT NULL,
+			vault_uuid TEXT NOT NULL,
+			data BLOB NOT NULL,
+			PRIMARY KEY (account_uuid, vault_uuid),
+			FOREIGN KEY (account_uuid) REFERENCES accounts(account_uuid) ON DELETE CASCADE
+		);
+
+		CREATE TABLE items (
+			account_uuid TEXT NOT NULL,
+			vault_uuid TEXT NOT NULL,
+			item_uuid TEXT NOT NULL,
+			local_edit_count INTEGER NOT NULL,
+			rejection_reason INTEGER NOT NULL,
+			version INTEGER NOT NULL,
+			data BLOB NOT NULL,
+			PRIMARY KEY (account_uuid, vault_uuid, item_uuid),
+			FOREIGN KEY (account_uuid, vault_uuid) REFERENCES vaults(account_uuid, vault_uuid) ON DELETE CASCADE
 		);
 
 		CREATE TABLE objects_associated (
+			type INT NOT NULL,
+			account_uuid TEXT NOT NULL,
+			key_name TEXT NOT NULL,
+			data BLOB NOT NULL,
+			vault_uuid TEXT,
+			item_uuid TEXT,
+			PRIMARY KEY (type, account_uuid, key_name),
+			FOREIGN KEY (account_uuid) REFERENCES accounts(account_uuid) ON DELETE CASCADE
+		);
+
+		CREATE TABLE objects_unassociated (
 			key_name TEXT NOT NULL,
 			type INT NOT NULL,
 			data BLOB NOT NULL,
-			associated_item INT,
-			associated_account INT NOT NULL,
-			PRIMARY KEY (key_name, type, associated_account),
-			FOREIGN KEY (associated_account) REFERENCES accounts (id) ON DELETE CASCADE
-		);
-
-		CREATE TABLE item_overviews (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			uuid TEXT NOT NULL,
-			vault_id INTEGER NOT NULL,
-			created_at INTEGER NOT NULL DEFAULT 0,
-			updated_at INTEGER NOT NULL DEFAULT 0,
-			template_uuid TEXT NOT NULL DEFAULT '',
-			changer_uuid TEXT NOT NULL DEFAULT '',
-			favorite INTEGER NOT NULL DEFAULT 0,
-			trashed INTEGER NOT NULL DEFAULT 0,
-			version INTEGER NOT NULL DEFAULT 0,
-			local_edit_count INTEGER NOT NULL DEFAULT 0,
-			rejection_reason INTEGER NOT NULL DEFAULT 0,
-			enc_overview TEXT NOT NULL
-		);
-
-		CREATE TABLE item_details (
-			id INTEGER PRIMARY KEY,
-			enc_details TEXT NOT NULL
+			PRIMARY KEY (key_name, type)
 		);
 	`
 	_, err := db.Exec(schema)
 	return err
 }
 
-func createTestVault(db *sql.DB, accountID int64, name, vaultType, keysetUUID string, symKey []byte, rsaPub *rsa.PublicKey) (*TestVault, error) {
+func createTestVault(db *sql.DB, accountUUID, name, vaultType, keysetUUID string, symKey []byte, rsaPub *rsa.PublicKey) (*TestVault, error) {
 	vaultUUID := fmt.Sprintf("vault-%s-uuid", name)
 
 	// Generate vault key
@@ -448,27 +448,22 @@ func createTestVault(db *sql.DB, accountID int64, name, vaultType, keysetUUID st
 		return nil, err
 	}
 
-	encVaultKeyJSON, _ := json.Marshal(encVaultKey)
-	encAttrsJSON, _ := json.Marshal(encAttrs)
-
+	// v61 format: embedded objects, no vault_uuid in JSON
 	vaultData := map[string]interface{}{
-		"vault_uuid":    vaultUUID,
 		"vault_type":    vaultType,
-		"enc_vault_key": string(encVaultKeyJSON),
-		"enc_attrs":     string(encAttrsJSON),
+		"enc_vault_key": encVaultKey,
+		"enc_attrs":     encAttrs,
 	}
 	vaultJSON, _ := json.Marshal(vaultData)
 
-	res, err := db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'vault', ?)`,
-		accountID, vaultUUID, vaultJSON)
+	_, err = db.Exec(`INSERT INTO vaults (account_uuid, vault_uuid, data) VALUES (?, ?, ?)`,
+		accountUUID, vaultUUID, vaultJSON)
 	if err != nil {
 		return nil, err
 	}
-	vaultDBID, _ := res.LastInsertId()
 
 	return &TestVault{
 		UUID:  vaultUUID,
-		ID:    vaultDBID,
 		Name:  name,
 		Type:  vaultType,
 		Items: make(map[string]*TestItem),
@@ -476,7 +471,7 @@ func createTestVault(db *sql.DB, accountID int64, name, vaultType, keysetUUID st
 	}, nil
 }
 
-func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field, sections []Section) error {
+func addTestItem(db *sql.DB, accountUUID string, vault *TestVault, title string, fields []Field, sections []Section) error {
 	itemUUID := fmt.Sprintf("item-%s-uuid", title)
 
 	// Create overview
@@ -499,11 +494,122 @@ func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field, sec
 		return err
 	}
 
+	// v61 format: single data blob with overview + details
+	itemData := map[string]interface{}{
+		"category_uuid": "",
+		"changer_uuid":  "",
+		"created_at":    0,
+		"updated_at":    0,
+		"overview":      encOverview,
+		"details":       encDetails,
+		"is_favorite":   false,
+		"state":         0,
+		"validated":     false,
+	}
+	itemDataJSON, _ := json.Marshal(itemData)
+
+	_, err = db.Exec(
+		`INSERT INTO items (account_uuid, vault_uuid, item_uuid, local_edit_count, rejection_reason, version, data) VALUES (?, ?, ?, 0, 0, 0, ?)`,
+		accountUUID, vault.UUID, itemUUID, itemDataJSON)
+	if err != nil {
+		return err
+	}
+
+	vault.Items[title] = &TestItem{
+		UUID:   itemUUID,
+		Title:  title,
+		Fields: make(map[string]string),
+	}
+	for _, f := range fields {
+		vault.Items[title].Fields[f.Name] = f.Value
+	}
+
+	return nil
+}
+
+// createTestVaultV5 creates a vault in the old v5-era schema (account_objects table, stringified encrypted data).
+func createTestVaultV5(db *sql.DB, accountID int64, name, vaultType, keysetUUID string, symKey []byte, rsaPub *rsa.PublicKey) (*TestVault, error) {
+	vaultUUID := fmt.Sprintf("vault-%s-uuid", name)
+
+	vaultKey := make([]byte, 32)
+	if _, err := rand.Read(vaultKey); err != nil {
+		return nil, err
+	}
+
+	vaultKeyJWK := createSymmetricKeyJWK(vaultKey, vaultUUID)
+	encVaultKeyData, err := rsaEncryptOAEP(rsaPub, vaultKeyJWK)
+	if err != nil {
+		return nil, err
+	}
+	encVaultKey := &EncryptedData{
+		Enc:  "RSA-OAEP",
+		Kid:  keysetUUID,
+		Data: base64URLEncode(encVaultKeyData),
+	}
+
+	vaultAttrs := map[string]interface{}{"name": name}
+	vaultAttrsJSON, _ := json.Marshal(vaultAttrs)
+	encAttrs, err := createEncryptedData(vaultAttrsJSON, vaultKey, vaultUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	encVaultKeyJSON, _ := json.Marshal(encVaultKey)
+	encAttrsJSON, _ := json.Marshal(encAttrs)
+
+	// Old format: vault_uuid in JSON, stringified encrypted data
+	vaultData := map[string]interface{}{
+		"vault_uuid":    vaultUUID,
+		"vault_type":    vaultType,
+		"enc_vault_key": string(encVaultKeyJSON),
+		"enc_attrs":     string(encAttrsJSON),
+	}
+	vaultJSON, _ := json.Marshal(vaultData)
+
+	res, err := db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'vault', ?)`,
+		accountID, vaultUUID, vaultJSON)
+	if err != nil {
+		return nil, err
+	}
+	vaultDBID, _ := res.LastInsertId()
+
+	return &TestVault{
+		UUID:    vaultUUID,
+		Name:    name,
+		Type:    vaultType,
+		Items:   make(map[string]*TestItem),
+		key:     vaultKey,
+		v5DBID:  vaultDBID,
+	}, nil
+}
+
+// addTestItemV5 adds an item in the old v5-era schema (item_overviews + item_details tables).
+func addTestItemV5(db *sql.DB, vault *TestVault, title string, fields []Field, sections []Section) error {
+	itemUUID := fmt.Sprintf("item-%s-uuid", title)
+
+	overview := DecryptedOverview{Title: title}
+	overviewJSON, _ := json.Marshal(overview)
+	encOverview, err := createEncryptedData(overviewJSON, vault.key, vault.UUID)
+	if err != nil {
+		return err
+	}
+
+	details := DecryptedItem{
+		ItemUUID: itemUUID,
+		Fields:   fields,
+		Sections: sections,
+	}
+	detailsJSON, _ := json.Marshal(details)
+	encDetails, err := createEncryptedData(detailsJSON, vault.key, vault.UUID)
+	if err != nil {
+		return err
+	}
+
 	encOverviewJSON, _ := json.Marshal(encOverview)
 	encDetailsJSON, _ := json.Marshal(encDetails)
 
 	res, err := db.Exec(`INSERT INTO item_overviews (uuid, vault_id, created_at, updated_at, template_uuid, changer_uuid, favorite, trashed, version, local_edit_count, rejection_reason, enc_overview) VALUES (?, ?, 0, 0, '', '', 0, 0, 0, 0, 0, ?)`,
-		itemUUID, vault.ID, encOverviewJSON)
+		itemUUID, vault.v5DBID, encOverviewJSON)
 	if err != nil {
 		return err
 	}
@@ -517,14 +623,12 @@ func addTestItem(db *sql.DB, vault *TestVault, title string, fields []Field, sec
 
 	vault.Items[title] = &TestItem{
 		UUID:   itemUUID,
-		ID:     itemDBID,
 		Title:  title,
 		Fields: make(map[string]string),
 	}
 	for _, f := range fields {
 		vault.Items[title].Fields[f.Name] = f.Value
 	}
-
 	return nil
 }
 

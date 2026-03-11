@@ -248,7 +248,6 @@ func maybeBackupDB(db *sql.DB) error {
 
 // AccountInfo holds basic info for account selection.
 type AccountInfo struct {
-	ID          int64  // internal DB id
 	AccountUUID string // 1Password account UUID
 	Email       string
 	URL         string
@@ -259,7 +258,7 @@ type AccountInfo struct {
 func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 	t0 := time.Now()
 	rows, err := db.Query(`
-		SELECT id, account_uuid,
+		SELECT account_uuid,
 		       json_extract(data, '$.user_email'),
 		       json_extract(data, '$.sign_in_url'),
 		       json_extract(data, '$.account_type')
@@ -275,7 +274,7 @@ func getAccounts(db *sql.DB) ([]AccountInfo, error) {
 	for rows.Next() {
 		var a AccountInfo
 		var email, url, accountType sql.NullString
-		if err := rows.Scan(&a.ID, &a.AccountUUID, &email, &url, &accountType); err != nil {
+		if err := rows.Scan(&a.AccountUUID, &email, &url, &accountType); err != nil {
 			return nil, fmt.Errorf("failed to scan account: %w", err)
 		}
 		a.Email = email.String
@@ -320,30 +319,18 @@ func getSecretKeyFromDB(db *sql.DB, accountUUID string) (string, error) {
 	return deobfuscateSecretKey(account.SignInProvider.SecretKey)
 }
 
-// getAccountIDByUUID gets the internal account ID from UUID.
-func getAccountIDByUUID(db *sql.DB, accountUUID string) (int64, error) {
-	var id int64
-	t0 := time.Now()
-	err := db.QueryRow("SELECT id FROM accounts WHERE account_uuid = ?", accountUUID).Scan(&id)
-	logQueryTime("getAccountIDByUUID", t0)
-	if err != nil {
-		return 0, fmt.Errorf("account not found: %s", accountUUID)
-	}
-	return id, nil
-}
-
 // getPrimaryKeyset retrieves the primary keyset (encrypted by account password) for an account.
-func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
+func getPrimaryKeyset(db *sql.DB, accountUUID string) (*Keyset, error) {
 	var keyName string
 	var data []byte
 	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT key_name, data FROM objects_associated
-		WHERE associated_account = ?
+		WHERE account_uuid = ?
 		AND type = 36
 		AND json_extract(data, '$.encryptedBy') = 'mp'
 		LIMIT 1
-	`, accountID).Scan(&keyName, &data)
+	`, accountUUID).Scan(&keyName, &data)
 	logQueryTime("getPrimaryKeyset", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query primary keyset: %w", err)
@@ -359,13 +346,13 @@ func getPrimaryKeyset(db *sql.DB, accountID int64) (*Keyset, error) {
 }
 
 // getKeyset retrieves a keyset by UUID for an account.
-func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
+func getKeyset(db *sql.DB, accountUUID string, uuid string) (*Keyset, error) {
 	var data []byte
 	t0 := time.Now()
 	err := db.QueryRow(`
 		SELECT data FROM objects_associated
-		WHERE associated_account = ? AND type = 36 AND key_name = ?
-	`, accountID, uuid).Scan(&data)
+		WHERE account_uuid = ? AND type = 36 AND key_name = ?
+	`, accountUUID, uuid).Scan(&data)
 	logQueryTime("getKeyset", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query keyset %s: %w", uuid, err)
@@ -381,11 +368,11 @@ func getKeyset(db *sql.DB, accountID int64, uuid string) (*Keyset, error) {
 }
 
 // getVaults retrieves all vaults for an account.
-func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
+func getVaults(db *sql.DB, accountUUID string) ([]Vault, error) {
 	t0 := time.Now()
 	rows, err := db.Query(`
-		SELECT data FROM account_objects WHERE account_id = ? AND object_type = 'vault'
-	`, accountID)
+		SELECT vault_uuid, data FROM vaults WHERE account_uuid = ?
+	`, accountUUID)
 	logQueryTime("getVaults", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vaults: %w", err)
@@ -394,12 +381,11 @@ func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
 
 	var vaults []Vault
 	for rows.Next() {
+		var vault Vault
 		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		if err := rows.Scan(&vault.VaultUUID, &data); err != nil {
 			return nil, fmt.Errorf("failed to scan vault row: %w", err)
 		}
-
-		var vault Vault
 		if err := json.Unmarshal(data, &vault); err != nil {
 			return nil, fmt.Errorf("failed to parse vault data: %w", err)
 		}
@@ -409,91 +395,64 @@ func getVaults(db *sql.DB, accountID int64) ([]Vault, error) {
 	return vaults, nil
 }
 
-// getVaultByID retrieves a vault by its internal ID.
-func getVaultByID(db *sql.DB, id int64) (*Vault, error) {
+// getVaultByUUID retrieves a vault by its UUID for an account.
+func getVaultByUUID(db *sql.DB, accountUUID, vaultUUID string) (*Vault, error) {
 	var data []byte
 	t0 := time.Now()
 	err := db.QueryRow(`
-		SELECT data FROM account_objects WHERE id = ? AND object_type = 'vault'
-	`, id).Scan(&data)
-	logQueryTime("getVaultByID", t0)
+		SELECT data FROM vaults WHERE account_uuid = ? AND vault_uuid = ?
+	`, accountUUID, vaultUUID).Scan(&data)
+	logQueryTime("getVaultByUUID", t0)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query vault %d: %w", id, err)
+		return nil, fmt.Errorf("vault not found: %s", vaultUUID)
 	}
 
 	var vault Vault
 	if err := json.Unmarshal(data, &vault); err != nil {
 		return nil, fmt.Errorf("failed to parse vault data: %w", err)
 	}
+	vault.VaultUUID = vaultUUID
 
 	return &vault, nil
 }
 
-// getVaultIDByUUID gets the internal vault ID from its UUID for an account.
-func getVaultIDByUUID(db *sql.DB, accountID int64, vaultUUID string) (int64, error) {
-	var id int64
-	t0 := time.Now()
-	err := db.QueryRow(`
-		SELECT id FROM account_objects
-		WHERE account_id = ? AND object_type = 'vault' AND json_extract(data, '$.vault_uuid') = ?
-	`, accountID, vaultUUID).Scan(&id)
-	logQueryTime("getVaultIDByUUID", t0)
-	if err != nil {
-		return 0, fmt.Errorf("vault not found: %s", vaultUUID)
-	}
-	return id, nil
-}
-
-// searchItems searches for items matching the given title in the specified vault
-// Returns all matching items (searches in decrypted overviews)
-func getItemOverviews(db *sql.DB, vaultID int64) ([]ItemOverview, error) {
+// getItems retrieves all non-trashed items for a vault.
+func getItems(db *sql.DB, accountUUID, vaultUUID string) ([]Item, error) {
 	t0 := time.Now()
 	rows, err := db.Query(`
-		SELECT id, uuid, vault_id, template_uuid, enc_overview
-		FROM item_overviews
-		WHERE vault_id = ? AND trashed = 0
-	`, vaultID)
-	logQueryTime("getItemOverviews", t0)
+		SELECT item_uuid, data FROM items
+		WHERE account_uuid = ? AND vault_uuid = ?
+		AND json_extract(data, '$.state') = 0
+	`, accountUUID, vaultUUID)
+	logQueryTime("getItems", t0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query items: %w", err)
 	}
 	defer rows.Close()
 
-	var items []ItemOverview
+	var items []Item
 	for rows.Next() {
-		var item ItemOverview
-		var encOverview []byte
-		if err := rows.Scan(&item.ID, &item.UUID, &item.VaultID, &item.TemplateUUID, &encOverview); err != nil {
+		var item Item
+		var data []byte
+		if err := rows.Scan(&item.UUID, &data); err != nil {
 			return nil, fmt.Errorf("failed to scan item row: %w", err)
 		}
+		item.VaultUUID = vaultUUID
 
-		if err := json.Unmarshal(encOverview, &item.EncOverview); err != nil {
-			return nil, fmt.Errorf("failed to parse encrypted overview: %w", err)
+		var parsed struct {
+			CategoryUUID string        `json:"category_uuid"`
+			Overview     EncryptedData `json:"overview"`
+			Details      EncryptedData `json:"details"`
 		}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return nil, fmt.Errorf("failed to parse item data: %w", err)
+		}
+		item.TemplateUUID = parsed.CategoryUUID
+		item.EncOverview = parsed.Overview
+		item.EncDetails = parsed.Details
 
 		items = append(items, item)
 	}
 
 	return items, nil
-}
-
-// getItemDetail retrieves the encrypted details for an item
-func getItemDetail(db *sql.DB, itemID int64) (*ItemDetail, error) {
-	var encDetails []byte
-	t0 := time.Now()
-	err := db.QueryRow(`
-		SELECT enc_details FROM item_details WHERE id = ?
-	`, itemID).Scan(&encDetails)
-	logQueryTime("getItemDetail", t0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query item details: %w", err)
-	}
-
-	var detail ItemDetail
-	detail.ID = itemID
-	if err := json.Unmarshal(encDetails, &detail.EncDetails); err != nil {
-		return nil, fmt.Errorf("failed to parse encrypted details: %w", err)
-	}
-
-	return &detail, nil
 }
