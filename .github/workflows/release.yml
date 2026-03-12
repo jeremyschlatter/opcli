@@ -38,10 +38,15 @@ jobs:
             -f pkcs12 \
             -k "$KEYCHAIN_PATH"
 
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
 
           # Allow codesign to access the key
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Test
+        env:
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+        run: nix develop -c make test
 
       - name: Build
         run: nix develop -c make VERSION=${{ github.ref_name }}
