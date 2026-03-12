@@ -186,7 +186,7 @@ type testDBYAML struct {
 // CreateTestDatabase creates a new test database with encrypted data.
 // If fromV1 is true, the database starts at schema v1, has old-format keysets
 // in account_objects, gets migrated through v2-v5, then has test data inserted.
-// The CLI will then run migrations v6-v60 at runtime (including the v60 keyset migration).
+// The CLI under test will then need to run all remaining migrations itself.
 func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 	// Read and parse YAML
 	yamlData, err := os.ReadFile("testdata/testdb.yaml")
@@ -574,12 +574,12 @@ func createTestVaultV5(db *sql.DB, accountID int64, name, vaultType, keysetUUID 
 	vaultDBID, _ := res.LastInsertId()
 
 	return &TestVault{
-		UUID:    vaultUUID,
-		Name:    name,
-		Type:    vaultType,
-		Items:   make(map[string]*TestItem),
-		key:     vaultKey,
-		v5DBID:  vaultDBID,
+		UUID:   vaultUUID,
+		Name:   name,
+		Type:   vaultType,
+		Items:  make(map[string]*TestItem),
+		key:    vaultKey,
+		v5DBID: vaultDBID,
 	}, nil
 }
 
