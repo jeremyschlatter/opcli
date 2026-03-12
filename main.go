@@ -1399,9 +1399,22 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		}
 	}
 
+	// Check if arg substitution is enabled
+	substituteArgs := env["OPCLI_RUN_SUBSTITUTE_ARGS"] == "1" || strings.EqualFold(env["OPCLI_RUN_SUBSTITUTE_ARGS"], "true")
+
+	// Collect op:// references in args if substitution is enabled
+	var argRefs []int // indices into cmdArgs that have op:// references
+	if substituteArgs {
+		for i, arg := range cmdArgs {
+			if strings.HasPrefix(arg, "op://") {
+				argRefs = append(argRefs, i)
+			}
+		}
+	}
+
 	// Resolve secrets if any
 	var secretValues []string
-	if len(secretRefs) > 0 {
+	if len(secretRefs) > 0 || len(argRefs) > 0 {
 		vk, err := openVaultKeychain(accountFlag)
 		if err != nil {
 			return 0, err
@@ -1416,6 +1429,17 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			secretValues = append(secretValues, value)
 			env[name] = value
 		}
+
+		for _, i := range argRefs {
+			value, err := readSecret(vk, cmdArgs[i])
+			if err != nil {
+				vk.Close()
+				return 0, fmt.Errorf("failed to resolve arg %q: %w", cmdArgs[i], err)
+			}
+			secretValues = append(secretValues, value)
+			cmdArgs[i] = value
+		}
+
 		vk.Close()
 	}
 
