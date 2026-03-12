@@ -1403,18 +1403,19 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	substituteArgs := env["OPCLI_RUN_SUBSTITUTE_ARGS"] == "1" || strings.EqualFold(env["OPCLI_RUN_SUBSTITUTE_ARGS"], "true")
 
 	// Collect op:// references in args if substitution is enabled
-	var argRefs []int // indices into cmdArgs that have op:// references
+	var argsHaveRefs bool
 	if substituteArgs {
-		for i, arg := range cmdArgs {
-			if strings.HasPrefix(arg, "op://") {
-				argRefs = append(argRefs, i)
+		for _, arg := range cmdArgs {
+			if strings.Contains(arg, "op://") {
+				argsHaveRefs = true
+				break
 			}
 		}
 	}
 
 	// Resolve secrets if any
 	var secretValues []string
-	if len(secretRefs) > 0 || len(argRefs) > 0 {
+	if len(secretRefs) > 0 || argsHaveRefs {
 		vk, err := openVaultKeychain(accountFlag)
 		if err != nil {
 			return 0, err
@@ -1430,14 +1431,27 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			env[name] = value
 		}
 
-		for _, i := range argRefs {
-			value, err := readSecret(vk, cmdArgs[i])
-			if err != nil {
-				vk.Close()
-				return 0, fmt.Errorf("failed to resolve arg %q: %w", cmdArgs[i], err)
+		if argsHaveRefs {
+			// Same pattern as inject's bare ref matching
+			opRefPattern := regexp.MustCompile(`op://[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
+			for i, arg := range cmdArgs {
+				refs := opRefPattern.FindAllString(arg, -1)
+				if len(refs) == 0 {
+					continue
+				}
+				// Resolve each ref and collect for masking
+				resolved := arg
+				for _, uri := range refs {
+					value, err := readSecret(vk, uri)
+					if err != nil {
+						vk.Close()
+						return 0, fmt.Errorf("failed to resolve arg %q: %w", uri, err)
+					}
+					secretValues = append(secretValues, value)
+					resolved = strings.Replace(resolved, uri, value, 1)
+				}
+				cmdArgs[i] = resolved
 			}
-			secretValues = append(secretValues, value)
-			cmdArgs[i] = value
 		}
 
 		vk.Close()

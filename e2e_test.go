@@ -53,8 +53,6 @@ type testEnv struct {
 func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	t.Helper()
 
-	os.Setenv(autoBackupDB, "")
-
 	// Build the test binary (cached across test runs)
 	binPath, err := buildTestBinary()
 	if err != nil {
@@ -91,7 +89,7 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 
 	// Store credentials in keychain using the signed binary
 	cmd := exec.Command(binPath, "test-store-creds")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(cleanEnv(),
 		"OPCLI_DB_PATH="+testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+dataDir,
 		"OPCLI_TEST_KEYCHAIN_SERVICE="+keychainService,
@@ -124,7 +122,7 @@ func (e *testEnv) cleanup(t *testing.T) {
 
 	// Delete the entire namespaced keychain entry
 	cmd := exec.Command(e.binPath, "test-delete-all-creds")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(cleanEnv(),
 		"OPCLI_TEST_DATA_DIR="+e.dataDir,
 		"OPCLI_TEST_KEYCHAIN_SERVICE="+e.keychainService,
 	)
@@ -134,9 +132,21 @@ func (e *testEnv) cleanup(t *testing.T) {
 	os.RemoveAll(e.tmpDir)
 }
 
-// baseEnv returns the base environment for CLI commands
+// cleanEnv returns os.Environ() with all OPCLI_ vars stripped,
+// so tests aren't affected by the user's configuration.
+func cleanEnv() []string {
+	var env []string
+	for _, v := range os.Environ() {
+		if !strings.HasPrefix(v, "OPCLI_") {
+			env = append(env, v)
+		}
+	}
+	return env
+}
+
+// baseEnv returns the base environment for CLI commands.
 func (e *testEnv) baseEnv() []string {
-	return append(os.Environ(),
+	return append(cleanEnv(),
 		"OPCLI_DB_PATH="+e.testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+e.dataDir,
 		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
@@ -179,6 +189,7 @@ type yamlTestCase struct {
 	OutPrefix string            `yaml:"outPrefix"`
 	Err       string            `yaml:"err"`
 	ErrPrefix string            `yaml:"errPrefix"`
+	ErrSuffix string            `yaml:"errSuffix"`
 	Code      int               `yaml:"code"`
 	Files     map[string]string `yaml:"files"`
 	Env       map[string]string `yaml:"env"`
@@ -281,6 +292,10 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 
 					if tc.ErrPrefix != "" && !strings.HasPrefix(stderr, tc.ErrPrefix) {
 						t.Errorf("stderr:\ngot:  %q\nwant prefix: %q", stderr, tc.ErrPrefix)
+					}
+
+					if tc.ErrSuffix != "" && !strings.HasSuffix(stderr, tc.ErrSuffix) {
+						t.Errorf("stderr:\ngot:  %q\nwant suffix: %q", stderr, tc.ErrSuffix)
 					}
 
 					// Check output files

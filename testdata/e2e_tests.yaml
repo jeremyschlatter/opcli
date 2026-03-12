@@ -26,12 +26,12 @@ read:
 
   - name: vault not found
     args: [read, "op://NoSuchVault/item/field"]
-    err: "Error: vault not found: NoSuchVault\n"
+    errSuffix: "Error: vault not found: NoSuchVault\n"
     code: 1
 
   - name: item not found
     args: [read, "op://Private/NoSuchItem/field"]
-    err: "Error: item not found: NoSuchItem\n"
+    errSuffix: "Error: item not found: NoSuchItem\n"
     code: 1
 
   - name: read field from item with object-valued fields
@@ -40,7 +40,7 @@ read:
 
   - name: field not found
     args: [read, "op://Private/Test Login/nosuchfield"]
-    err: "Error: field not found: nosuchfield\n"
+    errSuffix: "Error: field not found: nosuchfield\n"
     code: 1
 
 inject:
@@ -107,13 +107,13 @@ inject:
   - name: nonexistent item
     args: [inject]
     stdin: "{{ op://Private/nonexistent/field }}"
-    err: "Error: failed to read op://Private/nonexistent/field: item not found: nonexistent\n"
+    errSuffix: "Error: failed to read op://Private/nonexistent/field: item not found: nonexistent\n"
     code: 1
 
   - name: nonexistent vault
     args: [inject]
     stdin: "{{ op://NoSuchVault/item/field }}"
-    err: "Error: failed to read op://NoSuchVault/item/field: vault not found: NoSuchVault\n"
+    errSuffix: "Error: failed to read op://NoSuchVault/item/field: vault not found: NoSuchVault\n"
     code: 1
 
   - name: inject file
@@ -270,28 +270,28 @@ run:
     args: [run, --, sh, -c, "echo secret123 >&2"]
     env:
       SECRET: "op://Private/Test Login/password"
-    err: "<concealed by opcli>\n"
+    errSuffix: "<concealed by opcli>\n"
 
   # Error cases
   - name: vault not found
     args: [run, --, printenv, SECRET]
     env:
       SECRET: "op://NoSuchVault/item/field"
-    err: "Error: failed to resolve SECRET: vault not found: NoSuchVault\n"
+    errSuffix: "Error: failed to resolve SECRET: vault not found: NoSuchVault\n"
     code: 1
 
   - name: item not found
     args: [run, --, printenv, SECRET]
     env:
       SECRET: "op://Private/NoSuchItem/field"
-    err: "Error: failed to resolve SECRET: item not found: NoSuchItem\n"
+    errSuffix: "Error: failed to resolve SECRET: item not found: NoSuchItem\n"
     code: 1
 
   - name: field not found
     args: [run, --, printenv, SECRET]
     env:
       SECRET: "op://Private/Test Login/nosuchfield"
-    err: "Error: failed to resolve SECRET: field not found: nosuchfield\n"
+    errSuffix: "Error: failed to resolve SECRET: field not found: nosuchfield\n"
     code: 1
 
   - name: env file not found
@@ -349,3 +349,15 @@ run:
     env:
       OPCLI_RUN_SUBSTITUTE_ARGS: "1"
     out: "hello secret123 world\n"
+
+  - name: substitute args embedded in string
+    args: [run, --no-masking, --, echo, "--password=op://Private/Test Login/password"]
+    env:
+      OPCLI_RUN_SUBSTITUTE_ARGS: "1"
+    out: "--password=secret123\n"
+
+  - name: substitute args multiple refs in one arg
+    args: [run, --no-masking, --, echo, "op://Private/Test Login/username:op://Private/Test Login/password"]
+    env:
+      OPCLI_RUN_SUBSTITUTE_ARGS: "1"
+    out: "testuser:secret123\n"
