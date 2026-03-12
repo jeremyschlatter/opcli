@@ -10,8 +10,9 @@ import (
 func init() {
 	// Register test commands
 	testCommands = map[string]func() error{
-		"test-store-creds":  cmdTestStoreCredentials,
-		"test-delete-creds": cmdTestDeleteCredentials,
+		"test-store-creds":      cmdTestStoreCredentials,
+		"test-delete-creds":     cmdTestDeleteCredentials,
+		"test-delete-all-creds": func() error { return DeleteAllCredentials() },
 	}
 }
 

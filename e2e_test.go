@@ -42,11 +42,12 @@ func buildTestBinary() (string, error) {
 
 // testEnv holds environment setup for e2e tests
 type testEnv struct {
-	binPath    string
-	testDB     *TestDatabase
-	tmpDir     string
-	dataDir    string
-	sessionKey string
+	binPath         string
+	testDB          *TestDatabase
+	tmpDir          string
+	dataDir         string
+	sessionKey      string
+	keychainService string
 }
 
 func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
@@ -76,12 +77,16 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	// Create isolated data directory for sessions
 	dataDir := filepath.Join(tmpDir, "data")
 
+	// Each test env gets its own keychain namespace to avoid races
+	keychainService := fmt.Sprintf("opcli-test-%s", testDB.AccountUUID)
+
 	env := &testEnv{
-		binPath:    binPath,
-		testDB:     testDB,
-		tmpDir:     tmpDir,
-		dataDir:    dataDir,
-		sessionKey: "e2e-test-session",
+		binPath:         binPath,
+		testDB:          testDB,
+		tmpDir:          tmpDir,
+		dataDir:         dataDir,
+		sessionKey:      "e2e-test-session",
+		keychainService: keychainService,
 	}
 
 	// Store credentials in keychain using the signed binary
@@ -89,6 +94,7 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	cmd.Env = append(os.Environ(),
 		"OPCLI_DB_PATH="+testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+dataDir,
+		"OPCLI_TEST_KEYCHAIN_SERVICE="+keychainService,
 		"OPCLI_TEST_ACCOUNT_UUID="+testDB.AccountUUID,
 		"OPCLI_TEST_PASSWORD="+testDB.Password,
 		"OPCLI_TEST_EMAIL="+testDB.Email,
@@ -101,17 +107,26 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 		t.Fatalf("failed to store test credentials: %v\nstderr: %s", err, stderr.String())
 	}
 
+	// Verify credentials are readable (keychain can be flaky)
+	verifyCmd := exec.Command(binPath, "read", "op://Private/Test Login/password")
+	verifyCmd.Env = env.baseEnv()
+	var verifyErr bytes.Buffer
+	verifyCmd.Stderr = &verifyErr
+	if err := verifyCmd.Run(); err != nil {
+		t.Fatalf("credentials stored but not readable: %v\nstderr: %s", err, verifyErr.String())
+	}
+
 	return env
 }
 
 func (e *testEnv) cleanup(t *testing.T) {
 	t.Helper()
 
-	// Delete credentials from keychain
-	cmd := exec.Command(e.binPath, "test-delete-creds")
+	// Delete the entire namespaced keychain entry
+	cmd := exec.Command(e.binPath, "test-delete-all-creds")
 	cmd.Env = append(os.Environ(),
 		"OPCLI_TEST_DATA_DIR="+e.dataDir,
-		"OPCLI_TEST_ACCOUNT_UUID="+e.testDB.AccountUUID,
+		"OPCLI_TEST_KEYCHAIN_SERVICE="+e.keychainService,
 	)
 	cmd.Run() // ignore errors
 
@@ -125,6 +140,7 @@ func (e *testEnv) baseEnv() []string {
 		"OPCLI_DB_PATH="+e.testDB.Path,
 		"OPCLI_TEST_DATA_DIR="+e.dataDir,
 		"OPCLI_TEST_SESSION_KEY="+e.sessionKey,
+		"OPCLI_TEST_KEYCHAIN_SERVICE="+e.keychainService,
 	)
 }
 
