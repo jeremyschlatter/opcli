@@ -189,6 +189,9 @@ func saveSessions(store *SessionStore) error {
 		return err
 	}
 
+	// TODO: This write is not atomic — concurrent opcli invocations can
+	// corrupt the session store (seen as flaky "failed to parse session store"
+	// errors in CI). Fix when reworking session storage.
 	return os.WriteFile(path, data, 0600)
 }
 
