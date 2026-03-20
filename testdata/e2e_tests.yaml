@@ -177,6 +177,24 @@ run:
       .env: "DB_PASSWORD=op://Private/Test Login/password"
     out: "secret123\n"
 
+  - name: env file double-quoted value
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    files:
+      .env: 'DB_PASSWORD="op://Private/Test Login/password"'
+    out: "secret123\n"
+
+  - name: env file single-quoted value
+    args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
+    files:
+      .env: "DB_PASSWORD='op://Private/Test Login/password'"
+    out: "secret123\n"
+
+  - name: env file double-quoted non-secret value
+    args: [run, --no-masking, --env-file, .env, --, printenv, GREETING]
+    files:
+      .env: 'GREETING="hello world"'
+    out: "hello world\n"
+
   - name: env file with spaces around equals
     args: [run, --no-masking, --env-file, .env, --, printenv, DB_PASSWORD]
     files:

@@ -1546,6 +1546,11 @@ func parseEnvFile(path string, env map[string]string) (map[string]string, error)
 		key := strings.TrimSpace(line[:idx])
 		value := strings.TrimSpace(line[idx+1:])
 
+		// Strip surrounding quotes (double or single)
+		if len(value) >= 2 && (value[0] == '"' && value[len(value)-1] == '"' || value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+
 		// Expand variables in the value using both env and already-parsed results
 		value = os.Expand(value, func(name string) string {
 			if val, ok := result[name]; ok {
