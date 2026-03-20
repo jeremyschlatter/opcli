@@ -359,7 +359,7 @@ run:
     args: [run, --, echo, "op://Private/NoSuchItem/field"]
     env:
       OPCLI_RUN_SUBSTITUTE_ARGS: "1"
-    errPrefix: "Error: failed to resolve arg"
+    errSuffix: "Error: failed to resolve arg \"op://Private/NoSuchItem/field\": item not found: NoSuchItem\n"
     code: 1
 
   - name: substitute args non-op args unchanged
