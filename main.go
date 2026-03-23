@@ -480,25 +480,21 @@ func getCredentials(accountUUID string) (password string, err error) {
 
 // AccountKeychains manages lazily-opened account keychains sharing a single DB connection.
 type AccountKeychains struct {
-	db             *sql.DB
+	getDB          func() (*sql.DB, error)     // lazy DB open (started in background by openKeychains)
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
-	// Start DB open in background (pays cold-start cost in parallel with keychain)
-	type dbResult struct {
-		db  *sql.DB
-		err error
-	}
-	dbCh := make(chan dbResult, 1)
+	// Start DB open in background
+	dbCh := make(chan struct{ *sql.DB; error }, 1)
 	go func() {
 		db, err := openDB()
-		dbCh <- dbResult{db: db, err: err}
+		dbCh <- struct{ *sql.DB; error }{db, err}
 	}()
 
-	// Meanwhile, do keychain operations (pays keychain cold-start cost)
+	// Meanwhile, do keychain operations (pays keychain cold-start cost in parallel with DB)
 	accountUUID, err := resolveAccountUUID(accountFlag)
 	if err != nil {
 		return nil, err
@@ -518,23 +514,18 @@ func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
 		t.mark("get stored accounts")
 	}
 
-	// Wait for DB result
-	dbRes := <-dbCh
-	if dbRes.err != nil {
-		return nil, dbRes.err
-	}
-	if t != nil {
-		t.mark("open DB (parallel)")
-	}
-
-	aks := &AccountKeychains{
-		db:             dbRes.db,
+	return &AccountKeychains{
+		getDB: sync.OnceValues(func() (*sql.DB, error) {
+			res := <-dbCh
+			if t != nil {
+				t.mark("open DB (parallel)")
+			}
+			return res.DB, res.error
+		}),
 		defaultAccount: accountUUID,
 		accounts:       make(map[string]*AccountKeychain),
 		store:          store,
-	}
-
-	return aks, nil
+	}, nil
 }
 
 // get returns the AccountKeychain for the given identifier (shorthand, UUID, email, or URL).
@@ -567,7 +558,12 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		t.mark("get credentials (session check)")
 	}
 
-	accounts, err := getAccounts(aks.db)
+	db, err := aks.getDB()
+	if err != nil {
+		return nil, err
+	}
+
+	accounts, err := getAccounts(db)
 	if err != nil {
 		return nil, err
 	}
@@ -583,7 +579,7 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		}
 	}
 
-	secretKey, err := getSecretKeyFromDB(aks.db, uuid)
+	secretKey, err := getSecretKeyFromDB(db, uuid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read secret key from database: %w", err)
 	}
@@ -591,7 +587,7 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		t.mark("read secret key (DB)")
 	}
 
-	ak, err := newAccountKeychain(aks.db, password, secretKey, storedAcct.Email, uuid, accountType, t)
+	ak, err := newAccountKeychain(db, password, secretKey, storedAcct.Email, uuid, accountType, t)
 	if err != nil {
 		return nil, err
 	}
@@ -604,7 +600,9 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 }
 
 func (aks *AccountKeychains) Close() {
-	aks.db.Close()
+	if db, err := aks.getDB(); err == nil {
+		db.Close()
+	}
 }
 
 // AccountKeychain holds decrypted keys for accessing a single account's vault items.
@@ -1157,8 +1155,11 @@ func cmdList(accountFlag string) error {
 	}
 	defer aks.Close()
 
-	ak, _ := aks.get("", nil) // default account, already opened
-	vaults, err := getVaults(aks.db, ak.accountUUID)
+	ak, err := aks.get("", nil)
+	if err != nil {
+		return err
+	}
+	vaults, err := getVaults(ak.db, ak.accountUUID)
 	if err != nil {
 		return err
 	}
