@@ -87,22 +87,26 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 		keychainService: keychainService,
 	}
 
-	// Store credentials in keychain using the signed binary
-	cmd := exec.Command(binPath, "test-store-creds")
-	cmd.Env = append(cleanEnv(),
-		"OPCLI_DB_PATH="+testDB.Path,
-		"OPCLI_TEST_DATA_DIR="+dataDir,
-		"OPCLI_TEST_KEYCHAIN_SERVICE="+keychainService,
-		"OPCLI_TEST_ACCOUNT_UUID="+testDB.AccountUUID,
-		"OPCLI_TEST_PASSWORD="+testDB.Password,
-		"OPCLI_TEST_EMAIL="+testDB.Email,
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		testDB.Cleanup()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("failed to store test credentials: %v\nstderr: %s", err, stderr.String())
+	// Store credentials in keychain for all accounts
+	for _, acct := range testDB.Accounts {
+		cmd := exec.Command(binPath, "test-store-creds")
+		cmd.Env = append(cleanEnv(),
+			"OPCLI_DB_PATH="+testDB.Path,
+			"OPCLI_TEST_DATA_DIR="+dataDir,
+			"OPCLI_TEST_KEYCHAIN_SERVICE="+keychainService,
+			"OPCLI_TEST_ACCOUNT_UUID="+acct.UUID,
+			"OPCLI_TEST_PASSWORD="+acct.Password,
+			"OPCLI_TEST_EMAIL="+acct.Email,
+			"OPCLI_TEST_SHORTHAND="+acct.Shorthand,
+			"OPCLI_TEST_URL="+acct.URL,
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			testDB.Cleanup()
+			os.RemoveAll(tmpDir)
+			t.Fatalf("failed to store test credentials for %s: %v\nstderr: %s", acct.UUID, err, stderr.String())
+		}
 	}
 
 	// Verify credentials are readable (keychain can be flaky)

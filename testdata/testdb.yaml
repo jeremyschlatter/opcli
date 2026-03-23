@@ -1,62 +1,81 @@
-credentials:
-  secret_key: A3-TEST01-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE
-  password: test-password
-  email: test@example.com
-  account_uuid: test-account-uuid-1234
-  user_name: Test User
-  sign_in_url: https://test.1password.com
+accounts:
+  - credentials:
+      secret_key: A3-TEST01-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE
+      password: test-password
+      email: test@example.com
+      account_uuid: test-account-uuid-1234
+      shorthand: my
+      user_name: Test User
+      sign_in_url: https://my.1password.com
+    vaults:
+      - name: Private
+        type: P
+        items:
+          - title: Test Login
+            fields:
+              - name: username
+                type: string
+                value: testuser
+              - name: password
+                type: concealed
+                value: secret123
+          - title: Test API Key
+            fields:
+              - name: credential
+                type: concealed
+                value: api-key-12345
+          - title: Test Sectioned
+            fields:
+              - name: notes
+                type: string
+                value: "top level note"
+            sections:
+              - name: server
+                title: Server Details
+                fields:
+                  - name: hostname
+                    type: string
+                    value: example.com
+                  - name: port
+                    type: string
+                    value: "8080"
+          - title: Test Empty
+            fields:
+              - name: empty
+                type: string
+                value: ""
+          - title: Test Object Field
+            sections:
+              - name: tokens
+                title: Tokens
+                fields:
+                  - name: example
+                    type: string
+                    value: example-token-value
+                  - name: sign in with
+                    type: ssoLogin
+                    value:
+                      provider: google
+                      item:
+                        vaultUuid: "fake-vault-uuid-1234"
+                        itemUuid: "fake-item-uuid-5678"
+      - name: Work
+        type: U
 
-vaults:
-  - name: Private
-    type: P
-    items:
-      - title: Test Login
-        fields:
-          - name: username
-            type: string
-            value: testuser
-          - name: password
-            type: concealed
-            value: secret123
-      - title: Test API Key
-        fields:
-          - name: credential
-            type: concealed
-            value: api-key-12345
-      - title: Test Sectioned
-        fields:
-          - name: notes
-            type: string
-            value: "top level note"
-        sections:
-          - name: server
-            title: Server Details
+  - credentials:
+      secret_key: A3-TEST02-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE
+      password: test-password-2
+      email: test2@example.com
+      account_uuid: test-account-uuid-5678
+      shorthand: work
+      user_name: Test User 2
+      sign_in_url: https://work.1password.com
+    vaults:
+      - name: Shared
+        type: U
+        items:
+          - title: Work Login
             fields:
-              - name: hostname
-                type: string
-                value: example.com
-              - name: port
-                type: string
-                value: "8080"
-      - title: Test Empty
-        fields:
-          - name: empty
-            type: string
-            value: ""
-      - title: Test Object Field
-        sections:
-          - name: tokens
-            title: Tokens
-            fields:
-              - name: example
-                type: string
-                value: example-token-value
-              - name: sign in with
-                type: ssoLogin
-                value:
-                  provider: google
-                  item:
-                    vaultUuid: "fake-vault-uuid-1234"
-                    itemUuid: "fake-item-uuid-5678"
-  - name: Work
-    type: U
+              - name: password
+                type: concealed
+                value: work-secret-456

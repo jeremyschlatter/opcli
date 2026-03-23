@@ -43,6 +43,28 @@ read:
     errSuffix: "Error: field not found: nosuchfield\n"
     code: 1
 
+  # Account-qualified refs (4-part: account/vault/item/field)
+  - name: account-qualified ref via shorthand
+
+    args: [read, "op://work/Shared/Work Login/password"]
+    out: "work-secret-456\n"
+
+  - name: account-qualified ref to default account
+
+    args: [read, "op://my/Private/Test Login/password"]
+    out: "secret123\n"
+
+  # 4-part disambiguation: vault/item/section/field wins over account/vault/item/field
+  - name: 4-part prefers section over account
+    args: [read, "op://Private/Test Sectioned/server/hostname"]
+    out: "example.com\n"
+
+  # Account-qualified refs (5-part: account/vault/item/section/field)
+  - name: 5-part account-qualified ref with section
+
+    args: [read, "op://my/Private/Test Sectioned/server/hostname"]
+    out: "example.com\n"
+
 inject:
   # Braced references
   - name: braced reference with spaces
@@ -115,6 +137,12 @@ inject:
     stdin: "{{ op://NoSuchVault/item/field }}"
     errSuffix: "Error: failed to read op://NoSuchVault/item/field: vault not found: NoSuchVault\n"
     code: 1
+
+  - name: inject with account-qualified ref
+
+    args: [inject]
+    stdin: "secret={{ op://work/Shared/Work Login/password }}"
+    out: secret=work-secret-456
 
   - name: inject file
     args: [inject, -i, input.txt, -o, output.txt]
@@ -289,6 +317,14 @@ run:
     env:
       SECRET: "op://Private/Test Login/password"
     errSuffix: "<concealed by opcli>\n"
+
+  # Account-qualified refs in env vars
+  - name: resolve account-qualified env var
+
+    args: [run, --no-masking, --, printenv, WORK_PASS]
+    env:
+      WORK_PASS: "op://work/Shared/Work Login/password"
+    out: "work-secret-456\n"
 
   # Error cases
   - name: vault not found

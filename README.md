@@ -46,6 +46,13 @@ opcli signin
 # Read a field from an item (prompts Touch ID on first use per terminal)
 opcli read "op://VaultName/ItemName/fieldname"
 
+# Read a field in a section
+opcli read "op://VaultName/ItemName/SectionName/fieldname"
+
+# Read from a specific account (by shorthand, email, UUID, or URL)
+opcli read "op://AccountName/VaultName/ItemName/fieldname"
+opcli read "op://AccountName/VaultName/ItemName/SectionName/fieldname"
+
 # List all vaults
 opcli list
 
@@ -55,6 +62,20 @@ opcli get "op://VaultName/ItemName"
 # Remove credentials from Keychain
 opcli signout
 ```
+
+### Secret reference format
+
+```
+op://[account/]vault/item/[section/]field
+```
+
+> **Note:** The optional `account` prefix is an opcli extension. The official 1Password CLI (`op`) does not support account names in `op://` references — it uses the `--account` flag or `OP_ACCOUNT` env var instead. opcli supports those too, but embedding the account in the reference is often more convenient.
+
+References with four path components are ambiguous: `op://A/B/C/D` could be either `vault/item/section/field` or `account/vault/item/field`. When both interpretations resolve to a valid item, the section interpretation takes priority (matching the behavior of refs without an account). The account interpretation is tried as a fallback only when the section interpretation fails.
+
+Five-component references are unambiguous: `op://account/vault/item/section/field`.
+
+Account-qualified references work everywhere `op://` refs are supported: `read`, `inject`, `run` (env vars, `--env-file`, and arg substitution).
 
 ## Security
 

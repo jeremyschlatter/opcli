@@ -412,7 +412,7 @@ func cmdSignin(accountFlag string) error {
 
 	// Verify credentials work before storing
 	fmt.Fprintln(os.Stderr, "Verifying credentials...")
-	vk, err := newVaultKeychain(db, password, secretKey, account.UserEmail, dbAccount.AccountUUID, dbAccount.AccountType)
+	vk, err := newAccountKeychain(db, password, secretKey, account.UserEmail, dbAccount.AccountUUID, dbAccount.AccountType, nil)
 	if err != nil {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
@@ -478,8 +478,8 @@ func getCredentials(accountUUID string) (password string, err error) {
 	return pw, nil
 }
 
-// VaultKeychain holds decrypted keys for accessing vault items
-type VaultKeychain struct {
+// AccountKeychain holds decrypted keys for accessing vault items
+type AccountKeychain struct {
 	db              *sql.DB
 	accountUUID     string                     // 1Password account UUID
 	accountType     string                     // I=Individual, F=Family, T=Teams, B=Business
@@ -492,12 +492,8 @@ type VaultKeychain struct {
 	vaultKeysMu     sync.RWMutex               // protects vaultKeys for concurrent access
 }
 
-func newVaultKeychain(db *sql.DB, password, secretKey, email, accountUUID, accountType string) (*VaultKeychain, error) {
-	return newVaultKeychainTimed(db, password, secretKey, email, accountUUID, accountType, nil)
-}
-
-func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID, accountType string, t *timer) (*VaultKeychain, error) {
-	vk := &VaultKeychain{
+func newAccountKeychain(db *sql.DB, password, secretKey, email, accountUUID, accountType string, t *timer) (*AccountKeychain, error) {
+	vk := &AccountKeychain{
 		db:            db,
 		accountUUID:   accountUUID,
 		accountType:   accountType,
@@ -563,12 +559,12 @@ func newVaultKeychainTimed(db *sql.DB, password, secretKey, email, accountUUID, 
 	return vk, nil
 }
 
-func (vk *VaultKeychain) Close() {
+func (vk *AccountKeychain) Close() {
 	vk.db.Close()
 }
 
 // getKeysetRSAKey returns the RSA private key for a keyset, decrypting it if needed
-func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, error) {
+func (vk *AccountKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, error) {
 	// Check cache with read lock
 	vk.keysetMu.RLock()
 	if rsaKey, ok := vk.keysetRSAKeys[keysetUUID]; ok {
@@ -634,7 +630,7 @@ func (vk *VaultKeychain) getKeysetRSAKey(keysetUUID string) (*rsa.PrivateKey, er
 }
 
 // getVaultKey retrieves or decrypts the vault key for the given vault UUID
-func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
+func (vk *AccountKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 	// Check cache first (read lock)
 	vk.vaultKeysMu.RLock()
 	if key, ok := vk.vaultKeys[vaultUUID]; ok {
@@ -681,7 +677,7 @@ func (vk *VaultKeychain) getVaultKey(vaultUUID string) ([]byte, error) {
 }
 
 // decryptOverview decrypts an item overview using the vault key
-func (vk *VaultKeychain) decryptOverview(vaultUUID string, encOverview *EncryptedData) (*DecryptedOverview, error) {
+func (vk *AccountKeychain) decryptOverview(vaultUUID string, encOverview *EncryptedData) (*DecryptedOverview, error) {
 	key, err := vk.getVaultKey(vaultUUID)
 	if err != nil {
 		return nil, err
@@ -701,7 +697,7 @@ func (vk *VaultKeychain) decryptOverview(vaultUUID string, encOverview *Encrypte
 }
 
 // decryptDetail decrypts item details using the vault key
-func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedData) (*DecryptedItem, error) {
+func (vk *AccountKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedData) (*DecryptedItem, error) {
 	key, err := vk.getVaultKey(vaultUUID)
 	if err != nil {
 		return nil, err
@@ -721,7 +717,7 @@ func (vk *VaultKeychain) decryptDetail(vaultUUID string, encDetails *EncryptedDa
 }
 
 // decryptVaultName decrypts the vault attributes and returns the display name and raw name.
-func (vk *VaultKeychain) decryptVaultName(v *Vault) (displayName, rawName string, err error) {
+func (vk *AccountKeychain) decryptVaultName(v *Vault) (displayName, rawName string, err error) {
 	key, err := vk.getVaultKey(v.VaultUUID)
 	if err != nil {
 		return "", "", err
@@ -743,11 +739,7 @@ func (vk *VaultKeychain) decryptVaultName(v *Vault) (displayName, rawName string
 }
 
 // findVaultByName finds a vault by name or UUID.
-func (vk *VaultKeychain) findVaultByName(vaultName string) (string, error) {
-	return vk.findVaultByNameTimed(vaultName, nil)
-}
-
-func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (string, error) {
+func (vk *AccountKeychain) findVaultByName(vaultName string, t *timer) (string, error) {
 	vaults, err := getVaults(vk.db, vk.accountUUID)
 	if err != nil {
 		return "", err
@@ -806,11 +798,7 @@ func (vk *VaultKeychain) findVaultByNameTimed(vaultName string, t *timer) (strin
 }
 
 // findItemByName finds an item in a vault by title or UUID.
-func (vk *VaultKeychain) findItemByName(vaultUUID, itemName string) (*Item, error) {
-	return vk.findItemByNameTimed(vaultUUID, itemName, nil)
-}
-
-func (vk *VaultKeychain) findItemByNameTimed(vaultUUID, itemName string, t *timer) (*Item, error) {
+func (vk *AccountKeychain) findItemByName(vaultUUID, itemName string, t *timer) (*Item, error) {
 	items, err := getItems(vk.db, vk.accountUUID, vaultUUID)
 	if err != nil {
 		return nil, err
@@ -836,29 +824,32 @@ func (vk *VaultKeychain) findItemByNameTimed(vaultUUID, itemName string, t *time
 	return nil, fmt.Errorf("item not found: %s", itemName)
 }
 
-// parseOPURI parses an op://vault/item/[section/]field URI
-func parseOPURI(uri string) (vault, item, section, field string, err error) {
+// parseOPURI parses an op://[account/]vault/item/[section/]field URI.
+// For 4-part URIs, the result is ambiguous between vault/item/section/field
+// and account/vault/item/field. This function defaults to the former; callers
+// must handle the fallback to the latter.
+func parseOPURI(uri string) (account, vault, item, section, field string, err error) {
 	if !strings.HasPrefix(uri, "op://") {
-		return "", "", "", "", fmt.Errorf("invalid URI: must start with op://")
+		return "", "", "", "", "", fmt.Errorf("invalid URI: must start with op://")
 	}
 
 	parts := strings.Split(uri[5:], "/")
-	if len(parts) < 3 {
-		return "", "", "", "", fmt.Errorf("invalid URI: must be op://vault/item/field or op://vault/item/section/field")
+	switch len(parts) {
+	case 3:
+		return "", parts[0], parts[1], "", parts[2], nil
+	case 4:
+		// Ambiguous: could be vault/item/section/field or account/vault/item/field.
+		// Default to vault/item/section/field; callers handle fallback.
+		return "", parts[0], parts[1], parts[2], parts[3], nil
+	case 5:
+		return parts[0], parts[1], parts[2], parts[3], parts[4], nil
+	default:
+		return "", "", "", "", "", fmt.Errorf("invalid URI: expected op://vault/item/field, op://vault/item/section/field, op://account/vault/item/field, or op://account/vault/item/section/field")
 	}
-
-	if len(parts) == 3 {
-		return parts[0], parts[1], "", parts[2], nil
-	}
-	return parts[0], parts[1], parts[2], parts[3], nil
 }
 
-// openVaultKeychain is a helper to resolve account, get credentials, and open keychain.
-func openVaultKeychain(accountFlag string) (*VaultKeychain, error) {
-	return openVaultKeychainTimed(accountFlag, nil)
-}
-
-func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error) {
+// openAccountKeychain resolves account, gets credentials, and opens keychain.
+func openAccountKeychain(accountFlag string, t *timer) (*AccountKeychain, error) {
 	// Start DB open in background (pays cold-start cost in parallel with keychain)
 	type dbResult struct {
 		db  *sql.DB
@@ -943,7 +934,7 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 	}
 
 	// Initialize keychain
-	vk, err := newVaultKeychainTimed(db, password, secretKey, storedAcct.Email, accountUUID, accountType, t)
+	vk, err := newAccountKeychain(db, password, secretKey, storedAcct.Email, accountUUID, accountType, t)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -957,45 +948,57 @@ func openVaultKeychainTimed(accountFlag string, t *timer) (*VaultKeychain, error
 func cmdRead(uri string, accountFlag string) error {
 	t := newTimer()
 
-	vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
+	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return err
 	}
 	t.mark("parse URI")
 
-	vk, err := openVaultKeychainTimed(accountFlag, t)
+	effectiveAccount := accountFlag
+	if account != "" {
+		effectiveAccount = account
+	}
+
+	vk, err := openAccountKeychain(effectiveAccount, t)
 	if err != nil {
 		return err
 	}
 	defer vk.Close()
 
-	vaultUUID, err := vk.findVaultByNameTimed(vaultName, t)
+	value, err := resolveRef(vk, vaultName, itemName, sectionName, fieldName, t)
+	if err != nil && account == "" && sectionName != "" {
+		// 4-part ambiguity: retry as account/vault/item/field
+		if vk2, err2 := openAccountKeychain(vaultName, t); err2 == nil {
+			defer vk2.Close()
+			if value2, err2 := resolveRef(vk2, itemName, sectionName, "", fieldName, t); err2 == nil {
+				value, err = value2, nil
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
-	t.mark("find vault")
-
-	item, err := vk.findItemByNameTimed(vaultUUID, itemName, t)
-	if err != nil {
-		return err
-	}
-	t.mark("find item")
-
-	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
-	if err != nil {
-		return err
-	}
-	t.mark("decrypt item")
-
-	value, err := findField(decryptedItem, sectionName, fieldName)
-	if err != nil {
-		return err
-	}
-	t.mark("find field")
 
 	fmt.Println(value)
 	t.print()
 	return nil
+}
+
+// resolveRef resolves vault/item/[section/]field using a AccountKeychain.
+func resolveRef(vk *AccountKeychain, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+	vaultUUID, err := vk.findVaultByName(vaultName, t)
+	if err != nil {
+		return "", err
+	}
+	item, err := vk.findItemByName(vaultUUID, itemName, t)
+	if err != nil {
+		return "", err
+	}
+	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
+	if err != nil {
+		return "", err
+	}
+	return findField(decryptedItem, sectionName, fieldName)
 }
 
 // vaultDisplayName returns the display name for a vault.
@@ -1118,7 +1121,7 @@ func findField(item *DecryptedItem, sectionName, fieldName string) (string, erro
 }
 
 func cmdList(accountFlag string) error {
-	vk, err := openVaultKeychain(accountFlag)
+	vk, err := openAccountKeychain(accountFlag, nil)
 	if err != nil {
 		return err
 	}
@@ -1173,18 +1176,18 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	vaultName, itemName := parts[0], parts[1]
 
-	vk, err := openVaultKeychain(accountFlag)
+	vk, err := openAccountKeychain(accountFlag, nil)
 	if err != nil {
 		return err
 	}
 	defer vk.Close()
 
-	vaultUUID, err := vk.findVaultByName(vaultName)
+	vaultUUID, err := vk.findVaultByName(vaultName, nil)
 	if err != nil {
 		return err
 	}
 
-	item, err := vk.findItemByName(vaultUUID, itemName)
+	item, err := vk.findItemByName(vaultUUID, itemName, nil)
 	if err != nil {
 		return err
 	}
@@ -1292,7 +1295,7 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 
 	// Open vault keychain once for all lookups
-	vk, err := openVaultKeychain(accountFlag)
+	vk, err := openAccountKeychain(accountFlag, nil)
 	if err != nil {
 		return err
 	}
@@ -1416,7 +1419,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	// Resolve secrets if any
 	var secretValues []string
 	if len(secretRefs) > 0 || argsHaveRefs {
-		vk, err := openVaultKeychain(accountFlag)
+		vk, err := openAccountKeychain(accountFlag, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -1681,28 +1684,35 @@ func printRunUsage() {
 }
 
 // readSecret reads a secret value from a URI using an already-opened vault keychain.
-func readSecret(vk *VaultKeychain, uri string) (string, error) {
-	vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
+// If the URI specifies an account, a separate AccountKeychain is opened for that account.
+// For 4-part URIs, the vault/item/section/field interpretation is tried first;
+// if it fails, the account/vault/item/field interpretation is tried as a fallback.
+func readSecret(vk *AccountKeychain, uri string) (string, error) {
+	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return "", err
 	}
 
-	vaultUUID, err := vk.findVaultByName(vaultName)
-	if err != nil {
-		return "", err
+	if account != "" {
+		vk2, err := openAccountKeychain(account, nil)
+		if err != nil {
+			return "", err
+		}
+		defer vk2.Close()
+		return resolveRef(vk2, vaultName, itemName, sectionName, fieldName, nil)
 	}
 
-	item, err := vk.findItemByName(vaultUUID, itemName)
-	if err != nil {
-		return "", err
+	value, err := resolveRef(vk, vaultName, itemName, sectionName, fieldName, nil)
+	if err != nil && sectionName != "" {
+		// 4-part ambiguity: try account/vault/item/field
+		if vk2, err2 := openAccountKeychain(vaultName, nil); err2 == nil {
+			defer vk2.Close()
+			if value2, err2 := resolveRef(vk2, itemName, sectionName, "", fieldName, nil); err2 == nil {
+				return value2, nil
+			}
+		}
 	}
-
-	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
-	if err != nil {
-		return "", err
-	}
-
-	return findField(decryptedItem, sectionName, fieldName)
+	return value, err
 }
 
 // parseRSAPrivateKey parses a JWK JSON into an RSA private key

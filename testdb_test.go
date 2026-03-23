@@ -127,12 +127,25 @@ func createRSAPrivateKeyJWK(key *rsa.PrivateKey, kid string) []byte {
 
 // TestDatabase holds all the components needed for a test database
 type TestDatabase struct {
-	Path        string
+	Path     string
+	Accounts []*TestAccount
+
+	// Shorthand for Accounts[0] fields (backward compat with existing tests)
 	AccountUUID string
 	SecretKey   string
 	Password    string
 	Email       string
 	Vaults      map[string]*TestVault // by vault name
+}
+
+type TestAccount struct {
+	UUID      string
+	SecretKey string
+	Password  string
+	Email     string
+	Shorthand string
+	URL       string
+	Vaults    map[string]*TestVault
 }
 
 type TestVault struct {
@@ -152,11 +165,16 @@ type TestItem struct {
 
 // YAML schema for testdata/testdb.yaml
 type testDBYAML struct {
+	Accounts []testDBAccountYAML `yaml:"accounts"`
+}
+
+type testDBAccountYAML struct {
 	Credentials struct {
 		SecretKey   string `yaml:"secret_key"`
 		Password    string `yaml:"password"`
 		Email       string `yaml:"email"`
 		AccountUUID string `yaml:"account_uuid"`
+		Shorthand   string `yaml:"shorthand"`
 		UserName    string `yaml:"user_name"`
 		SignInURL   string `yaml:"sign_in_url"`
 	} `yaml:"credentials"`
@@ -183,6 +201,147 @@ type testDBYAML struct {
 	} `yaml:"vaults"`
 }
 
+// testAccountKeys holds the generated key material for a test account.
+type testAccountKeys struct {
+	rsaKey     *rsa.PrivateKey
+	symKey     []byte
+	keysetUUID string
+}
+
+// insertAccountAndKeyset inserts the account record and keyset into the DB.
+// Vault/item creation must happen separately (after migrations for fromV1).
+func insertAccountAndKeyset(db *sql.DB, acctSpec testDBAccountYAML, fromV1 bool, v1AccountID int64) (*TestAccount, *testAccountKeys, error) {
+	creds := acctSpec.Credentials
+	keysetUUID := fmt.Sprintf("keyset-%s", creds.AccountUUID)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate RSA key: %w", err)
+	}
+	symKey := make([]byte, 32)
+	if _, err := rand.Read(symKey); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate symmetric key: %w", err)
+	}
+
+	accountJSON, _ := json.Marshal(map[string]interface{}{
+		"account_uuid": creds.AccountUUID,
+		"user_email":   creds.Email,
+		"user_name":    creds.UserName,
+		"sign_in_url":  creds.SignInURL,
+		"sign_in_provider": map[string]interface{}{
+			"type":       "sk",
+			"secret_key": obfuscateSecretKey(creds.SecretKey),
+		},
+	})
+
+	symKeyJWK := createSymmetricKeyJWK(symKey, keysetUUID)
+	encSymKey, err := createPBES2EncryptedData(symKeyJWK, creds.SecretKey, creds.Password, creds.Email)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encrypt sym key: %w", err)
+	}
+	rsaKeyJWK := createRSAPrivateKeyJWK(rsaKey, keysetUUID)
+	encPriKey, err := createEncryptedData(rsaKeyJWK, symKey, keysetUUID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
+	}
+
+	if fromV1 {
+		_, err := db.Exec(`INSERT INTO accounts (data) VALUES (?)`, accountJSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to insert account: %w", err)
+		}
+
+		encSymKeyJSON, _ := json.Marshal(encSymKey)
+		encPriKeyJSON, _ := json.Marshal(encPriKey)
+		keysetData := map[string]interface{}{
+			"sn":           1,
+			"encrypted_by": "mp",
+			"enc_sym_key":  string(encSymKeyJSON),
+			"enc_pri_key":  string(encPriKeyJSON),
+		}
+		keysetJSON, _ := json.Marshal(keysetData)
+		_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (?, ?, 'keyset', ?)`,
+			v1AccountID, keysetUUID, keysetJSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to insert keyset: %w", err)
+		}
+	} else {
+		_, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
+			creds.AccountUUID, accountJSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to insert account: %w", err)
+		}
+
+		keysetData := map[string]interface{}{
+			"sn":          1,
+			"encryptedBy": "mp",
+			"encSymKey":   encSymKey,
+			"encPriKey":   encPriKey,
+		}
+		keysetJSON, _ := json.Marshal(keysetData)
+		_, err = db.Exec(`INSERT INTO objects_associated (type, account_uuid, key_name, data) VALUES (36, ?, ?, ?)`,
+			creds.AccountUUID, keysetUUID, keysetJSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to insert keyset: %w", err)
+		}
+	}
+
+	testAcct := &TestAccount{
+		UUID:      creds.AccountUUID,
+		SecretKey: creds.SecretKey,
+		Password:  creds.Password,
+		Email:     creds.Email,
+		Shorthand: creds.Shorthand,
+		URL:       creds.SignInURL,
+		Vaults:    make(map[string]*TestVault),
+	}
+
+	return testAcct, &testAccountKeys{rsaKey: rsaKey, symKey: symKey, keysetUUID: keysetUUID}, nil
+}
+
+// createVaultsAndItems creates vaults and items for a test account.
+// Must be called after migrations for fromV1.
+func createVaultsAndItems(db *sql.DB, acct *TestAccount, keys *testAccountKeys, acctSpec testDBAccountYAML, fromV1 bool, v1AccountID int64) error {
+	for _, vaultSpec := range acctSpec.Vaults {
+		var vault *TestVault
+		var err error
+		if fromV1 {
+			vault, err = createTestVaultV5(db, v1AccountID, vaultSpec.Name, vaultSpec.Type, keys.keysetUUID, keys.symKey, &keys.rsaKey.PublicKey)
+		} else {
+			vault, err = createTestVault(db, acct.UUID, vaultSpec.Name, vaultSpec.Type, keys.keysetUUID, keys.symKey, &keys.rsaKey.PublicKey)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to create vault %s: %w", vaultSpec.Name, err)
+		}
+		acct.Vaults[vaultSpec.Name] = vault
+
+		for _, itemSpec := range vaultSpec.Items {
+			var fields []Field
+			for _, f := range itemSpec.Fields {
+				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: fmt.Sprintf("%v", f.Value)})
+			}
+			var sections []Section
+			for _, s := range itemSpec.Sections {
+				var sectionFields []Field
+				for _, f := range s.Fields {
+					v, _ := json.Marshal(f.Value)
+					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: v})
+				}
+				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
+			}
+			if fromV1 {
+				err = addTestItemV5(db, vault, itemSpec.Title, fields, sections)
+			} else {
+				err = addTestItem(db, acct.UUID, vault, itemSpec.Title, fields, sections)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to add item %s: %w", itemSpec.Title, err)
+			}
+		}
+	}
+	return nil
+}
+
 // CreateTestDatabase creates a new test database with encrypted data.
 // If fromV1 is true, the database starts at schema v1, has old-format keysets
 // in account_objects, gets migrated through v2-v5, then has test data inserted.
@@ -206,74 +365,38 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 	}
 	defer db.Close()
 
-	// Generate keys
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate RSA key: %w", err)
-	}
-
-	symKey := make([]byte, 32)
-	if _, err := rand.Read(symKey); err != nil {
-		return nil, fmt.Errorf("failed to generate symmetric key: %w", err)
-	}
-
-	keysetUUID := "keyset-uuid-1234"
-	creds := spec.Credentials
-
-	accountJSON, _ := json.Marshal(map[string]interface{}{
-		"account_uuid": creds.AccountUUID,
-		"user_email":   creds.Email,
-		"user_name":    creds.UserName,
-		"sign_in_url":  creds.SignInURL,
-		"sign_in_provider": map[string]interface{}{
-			"type":       "sk",
-			"secret_key": obfuscateSecretKey(creds.SecretKey),
-		},
-	})
-
-	// Create keyset encrypted with PBES2
-	symKeyJWK := createSymmetricKeyJWK(symKey, keysetUUID)
-	encSymKey, err := createPBES2EncryptedData(symKeyJWK, creds.SecretKey, creds.Password, creds.Email)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt sym key: %w", err)
-	}
-
-	rsaKeyJWK := createRSAPrivateKeyJWK(rsaKey, keysetUUID)
-	encPriKey, err := createEncryptedData(rsaKeyJWK, symKey, keysetUUID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
-	}
-
 	if fromV1 {
-		// V1 path: real schema, old-format keyset, migrations v1-v5
 		if err := migrations.All[1](db); err != nil {
 			return nil, fmt.Errorf("failed to apply v1 migration: %w", err)
 		}
+	} else {
+		if err := createSchema(db); err != nil {
+			return nil, fmt.Errorf("failed to create schema: %w", err)
+		}
+	}
 
-		// Insert account without account_uuid column (v2 extracts it from JSON)
-		_, err := db.Exec(`INSERT INTO accounts (data) VALUES (?)`, accountJSON)
+	testDB := &TestDatabase{
+		Path: dbPath,
+	}
+
+	// Phase 1: Insert accounts and keysets (before migrations for fromV1)
+	type accountSetup struct {
+		acct *TestAccount
+		keys *testAccountKeys
+		spec testDBAccountYAML
+	}
+	var setups []accountSetup
+	for i, acctSpec := range spec.Accounts {
+		acct, keys, err := insertAccountAndKeyset(db, acctSpec, fromV1, int64(i+1))
 		if err != nil {
-			return nil, fmt.Errorf("failed to insert account: %w", err)
+			return nil, fmt.Errorf("failed to create account %s: %w", acctSpec.Credentials.AccountUUID, err)
 		}
+		setups = append(setups, accountSetup{acct, keys, acctSpec})
+		testDB.Accounts = append(testDB.Accounts, acct)
+	}
 
-		// Insert keyset in old format: snake_case keys, JSON-string-encoded encrypted data
-		encSymKeyJSON, _ := json.Marshal(encSymKey)
-		encPriKeyJSON, _ := json.Marshal(encPriKey)
-		keysetData := map[string]interface{}{
-			"sn":           1,
-			"encrypted_by": "mp",
-			"enc_sym_key":  string(encSymKeyJSON),
-			"enc_pri_key":  string(encPriKeyJSON),
-		}
-		keysetJSON, _ := json.Marshal(keysetData)
-
-		_, err = db.Exec(`INSERT INTO account_objects (account_id, uuid, object_type, data) VALUES (1, ?, 'keyset', ?)`,
-			keysetUUID, keysetJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to insert keyset: %w", err)
-		}
-
-		// Run migrations v2-v5
+	if fromV1 {
+		// Run migrations v2-v5 (creates item_overviews, etc.)
 		for v := 2; v <= 5; v++ {
 			if migrations.All[v] != nil {
 				if err := migrations.All[v](db); err != nil {
@@ -281,84 +404,22 @@ func CreateTestDatabase(dir string, fromV1 bool) (*TestDatabase, error) {
 				}
 			}
 		}
+	}
 
-		// Leave DB at version 5 (migrations already set this)
-	} else {
-		// Simplified schema path (v61)
-		if err := createSchema(db); err != nil {
-			return nil, fmt.Errorf("failed to create schema: %w", err)
-		}
-
-		_, err := db.Exec(`INSERT INTO accounts (account_uuid, data) VALUES (?, ?)`,
-			creds.AccountUUID, accountJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to insert account: %w", err)
-		}
-
-		keysetData := map[string]interface{}{
-			"sn":          1,
-			"encryptedBy": "mp",
-			"encSymKey":   encSymKey,
-			"encPriKey":   encPriKey,
-		}
-		keysetJSON, _ := json.Marshal(keysetData)
-
-		_, err = db.Exec(`INSERT INTO objects_associated (type, account_uuid, key_name, data) VALUES (36, ?, ?, ?)`,
-			creds.AccountUUID, keysetUUID, keysetJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to insert keyset: %w", err)
+	// Phase 2: Create vaults and items (after migrations for fromV1)
+	for i, s := range setups {
+		if err := createVaultsAndItems(db, s.acct, s.keys, s.spec, fromV1, int64(i+1)); err != nil {
+			return nil, fmt.Errorf("failed to create vaults for account %s: %w", s.acct.UUID, err)
 		}
 	}
 
-	testDB := &TestDatabase{
-		Path:        dbPath,
-		AccountUUID: creds.AccountUUID,
-		SecretKey:   creds.SecretKey,
-		Password:    creds.Password,
-		Email:       creds.Email,
-		Vaults:      make(map[string]*TestVault),
-	}
-
-	// Create vaults and items from YAML
-	for _, vaultSpec := range spec.Vaults {
-		var vault *TestVault
-		var err error
-		if fromV1 {
-			vault, err = createTestVaultV5(db, 1, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
-		} else {
-			vault, err = createTestVault(db, creds.AccountUUID, vaultSpec.Name, vaultSpec.Type, keysetUUID, symKey, &rsaKey.PublicKey)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to create vault %s: %w", vaultSpec.Name, err)
-		}
-		testDB.Vaults[vaultSpec.Name] = vault
-
-		for _, itemSpec := range vaultSpec.Items {
-			var fields []Field
-			for _, f := range itemSpec.Fields {
-				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: fmt.Sprintf("%v", f.Value)})
-			}
-
-			var sections []Section
-			for _, s := range itemSpec.Sections {
-				var sectionFields []Field
-				for _, f := range s.Fields {
-					v, _ := json.Marshal(f.Value)
-					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: v})
-				}
-				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
-			}
-
-			if fromV1 {
-				err = addTestItemV5(db, vault, itemSpec.Title, fields, sections)
-			} else {
-				err = addTestItem(db, creds.AccountUUID, vault, itemSpec.Title, fields, sections)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to add item %s: %w", itemSpec.Title, err)
-			}
-		}
-	}
+	// Populate shorthand fields from first account
+	first := testDB.Accounts[0]
+	testDB.AccountUUID = first.UUID
+	testDB.SecretKey = first.SecretKey
+	testDB.Password = first.Password
+	testDB.Email = first.Email
+	testDB.Vaults = first.Vaults
 
 	return testDB, nil
 }

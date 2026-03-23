@@ -22,6 +22,8 @@ func cmdTestStoreCredentials() error {
 	accountUUID := os.Getenv("OPCLI_TEST_ACCOUNT_UUID")
 	password := os.Getenv("OPCLI_TEST_PASSWORD")
 	email := os.Getenv("OPCLI_TEST_EMAIL")
+	shorthand := os.Getenv("OPCLI_TEST_SHORTHAND")
+	url := os.Getenv("OPCLI_TEST_URL")
 
 	if accountUUID == "" || password == "" {
 		return fmt.Errorf("OPCLI_TEST_ACCOUNT_UUID, OPCLI_TEST_PASSWORD required")
@@ -29,8 +31,14 @@ func cmdTestStoreCredentials() error {
 	if email == "" {
 		email = "test@example.com"
 	}
+	if shorthand == "" {
+		shorthand = "test"
+	}
+	if url == "" {
+		url = "https://test.1password.com"
+	}
 
-	return StoreCredentials(accountUUID, password, "test", email, "https://test.1password.com")
+	return StoreCredentials(accountUUID, password, shorthand, email, url)
 }
 
 // cmdTestDeleteCredentials deletes test credentials from the keychain.
