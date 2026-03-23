@@ -976,19 +976,13 @@ func parseOPURI(uri string) (account, vault, item, section, field string, err er
 func cmdRead(uri string, accountFlag string) error {
 	t := newTimer()
 
-	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
-	if err != nil {
-		return err
-	}
-	t.mark("parse URI")
-
 	aks, err := openKeychains(accountFlag, t)
 	if err != nil {
 		return err
 	}
 	defer aks.Close()
 
-	value, err := resolveRef(aks, account, vaultName, itemName, sectionName, fieldName, t)
+	value, err := resolveRef(aks, uri, t)
 	if err != nil {
 		return err
 	}
@@ -998,11 +992,15 @@ func cmdRead(uri string, accountFlag string) error {
 	return nil
 }
 
-// resolveRef resolves [account/]vault/item/[section/]field using AccountKeychains.
-// Pass "" for account to use the default account.
-// For 4-part URIs (where account="" and section!=""), automatically tries the
-// account/vault/item/field interpretation as a fallback.
-func resolveRef(aks *AccountKeychains, account, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+// resolveRef parses an op:// URI and resolves it to a secret value.
+// For 4-part URIs (ambiguous between vault/item/section/field and
+// account/vault/item/field), tries the section interpretation first.
+func resolveRef(aks *AccountKeychains, uri string, t *timer) (string, error) {
+	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
+	if err != nil {
+		return "", err
+	}
+
 	ak, err := aks.get(account, t)
 	if err != nil {
 		return "", err
@@ -1341,7 +1339,7 @@ func cmdInject(args []string, accountFlag string) error {
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
-		value, err := readSecret(aks, uri)
+		value, err := resolveRef(aks, uri, nil)
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", uri, err)
 		}
@@ -1462,7 +1460,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		}
 
 		for name, uri := range secretRefs {
-			value, err := readSecret(aks, uri)
+			value, err := resolveRef(aks, uri, nil)
 			if err != nil {
 				aks.Close()
 				return 0, fmt.Errorf("failed to resolve %s: %w", name, err)
@@ -1482,7 +1480,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 				// Resolve each ref and collect for masking
 				resolved := arg
 				for _, uri := range refs {
-					value, err := readSecret(aks, uri)
+					value, err := resolveRef(aks, uri, nil)
 					if err != nil {
 						aks.Close()
 						return 0, fmt.Errorf("failed to resolve arg %q: %w", uri, err)
@@ -1720,14 +1718,6 @@ func printRunUsage() {
 	fmt.Fprintln(os.Stderr, "  Secret references can use $VAR syntax: op://$VAULT/item/field")
 }
 
-// readSecret reads a secret value from a URI, resolving account-qualified refs as needed.
-func readSecret(aks *AccountKeychains, uri string) (string, error) {
-	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
-	if err != nil {
-		return "", err
-	}
-	return resolveRef(aks, account, vaultName, itemName, sectionName, fieldName, nil)
-}
 
 // parseRSAPrivateKey parses a JWK JSON into an RSA private key
 func parseRSAPrivateKey(jwkJSON []byte) (*rsa.PrivateKey, error) {
