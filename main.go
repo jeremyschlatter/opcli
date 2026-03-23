@@ -1001,24 +1001,21 @@ func resolveRef(aks *AccountKeychains, uri string, t *timer) (string, error) {
 		return "", err
 	}
 
-	ak, err := aks.get(account, t)
-	if err != nil {
-		return "", err
-	}
-
-	value, err := resolveRefFromAccount(ak, vaultName, itemName, sectionName, fieldName, t)
+	value, err := resolveRefFromAccount(aks, account, vaultName, itemName, sectionName, fieldName, t)
 	if err != nil && account == "" && sectionName != "" {
 		// 4-part ambiguity: retry as account/vault/item/field
-		if ak2, err2 := aks.get(vaultName, t); err2 == nil {
-			if value2, err2 := resolveRefFromAccount(ak2, itemName, sectionName, "", fieldName, t); err2 == nil {
-				return value2, nil
-			}
+		if value2, err2 := resolveRefFromAccount(aks, vaultName, itemName, sectionName, "", fieldName, t); err2 == nil {
+			return value2, nil
 		}
 	}
 	return value, err
 }
 
-func resolveRefFromAccount(ak *AccountKeychain, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+func resolveRefFromAccount(aks *AccountKeychains, account, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+	ak, err := aks.get(account, t)
+	if err != nil {
+		return "", err
+	}
 	vaultUUID, err := ak.findVaultByName(vaultName, t)
 	if err != nil {
 		return "", err
