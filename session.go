@@ -202,7 +202,7 @@ func computeSessionMAC(secret []byte, sessionKey, accountID string, created time
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// GetValidSession returns a valid session for the current TTY, or nil if none exists.
+// GetValidSession returns a valid session for the current TTY and account, or nil if none exists.
 func GetValidSession(accountID string) (*Session, error) {
 	sessionKey, err := getSessionKey()
 	if err != nil {
@@ -214,13 +214,9 @@ func GetValidSession(accountID string) (*Session, error) {
 		return nil, err
 	}
 
-	session, ok := store.Sessions[sessionKey]
+	key := sessionKey + ":" + accountID
+	session, ok := store.Sessions[key]
 	if !ok {
-		return nil, nil
-	}
-
-	// Check if session matches the account
-	if session.AccountID != accountID {
 		return nil, nil
 	}
 
@@ -232,7 +228,7 @@ func GetValidSession(accountID string) (*Session, error) {
 	expectedMAC := computeSessionMAC(secret, sessionKey, session.AccountID, session.Created)
 	if session.MAC != expectedMAC {
 		// Invalid MAC - session was forged or corrupted
-		delete(store.Sessions, sessionKey)
+		delete(store.Sessions, key)
 		saveSessions(store)
 		return nil, nil
 	}
@@ -241,14 +237,14 @@ func GetValidSession(accountID string) (*Session, error) {
 
 	// Check inactivity timeout (10 minutes)
 	if now.Sub(session.LastAccess) > sessionInactivityMax {
-		delete(store.Sessions, sessionKey)
+		delete(store.Sessions, key)
 		saveSessions(store)
 		return nil, nil
 	}
 
 	// Check absolute timeout (12 hours)
 	if now.Sub(session.Created) > sessionAbsoluteMax {
-		delete(store.Sessions, sessionKey)
+		delete(store.Sessions, key)
 		saveSessions(store)
 		return nil, nil
 	}
@@ -288,7 +284,7 @@ func CreateSession(accountID string) (*Session, error) {
 	}
 	session.MAC = computeSessionMAC(secret, sessionKey, accountID, now)
 
-	store.Sessions[sessionKey] = session
+	store.Sessions[sessionKey+":"+accountID] = session
 
 	if err := saveSessions(store); err != nil {
 		return nil, err
