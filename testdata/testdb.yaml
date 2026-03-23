@@ -61,6 +61,15 @@ accounts:
                         itemUuid: "fake-item-uuid-5678"
       - name: Work
         type: U
+        items:
+          - title: work
+            sections:
+              - name: work
+                title: work
+                fields:
+                  - name: field
+                    type: string
+                    value: my account field
 
   - credentials:
       secret_key: A3-TEST02-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE
@@ -79,3 +88,14 @@ accounts:
               - name: password
                 type: concealed
                 value: work-secret-456
+      - name: work
+        type: U
+        items:
+          - title: work
+            sections:
+              - name: work
+                title: work
+                fields:
+                  - name: field
+                    type: string
+                    value: work account field

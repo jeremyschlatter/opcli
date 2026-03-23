@@ -59,6 +59,27 @@ read:
     args: [read, "op://Private/Test Sectioned/server/hostname"]
     out: "example.com\n"
 
+  # Ambiguous 4-part where both interpretations resolve to a valid item.
+  # Default account is "my", which has vault "Work" with item "work", section "work", field "field".
+  # Account "work" also has vault "work" with item "work", field "field" (no section).
+  # Section interpretation (default account) wins.
+  - name: 4-part ambiguous prefers section over account
+    args: [read, "op://work/work/work/field"]
+    out: "my account field\n"
+
+  # Same ref, but with OP_ACCOUNT=work. Now the default account is "work", which also
+  # has vault "work" with item "work", section "work", field "field" — so section still wins.
+  - name: 4-part ambiguous with OP_ACCOUNT prefers section
+    args: [read, "op://work/work/work/field"]
+    env:
+      OP_ACCOUNT: work
+    out: "work account field\n"
+
+  # 5-part is unambiguous: account/vault/item/section/field
+  - name: 5-part reads from explicit account
+    args: [read, "op://work/work/work/work/field"]
+    out: "work account field\n"
+
   # Account-qualified refs (5-part: account/vault/item/section/field)
   - name: 5-part account-qualified ref with section
 
