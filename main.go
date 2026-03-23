@@ -478,9 +478,138 @@ func getCredentials(accountUUID string) (password string, err error) {
 	return pw, nil
 }
 
-// AccountKeychain holds decrypted keys for accessing vault items
+// AccountKeychains manages lazily-opened account keychains sharing a single DB connection.
+type AccountKeychains struct {
+	db             *sql.DB
+	defaultAccount string                      // UUID of the default/flag-specified account
+	accounts       map[string]*AccountKeychain // keyed by account UUID
+	store          *CredentialStore
+}
+
+func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
+	// Start DB open in background (pays cold-start cost in parallel with keychain)
+	type dbResult struct {
+		db  *sql.DB
+		err error
+	}
+	dbCh := make(chan dbResult, 1)
+	go func() {
+		db, err := openDB()
+		dbCh <- dbResult{db: db, err: err}
+	}()
+
+	// Meanwhile, do keychain operations (pays keychain cold-start cost)
+	accountUUID, err := resolveAccountUUID(accountFlag)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		t.mark("resolve account")
+	}
+
+	store, err := GetStoredAccounts()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := store.Accounts[accountUUID]; !ok {
+		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
+	}
+	if t != nil {
+		t.mark("get stored accounts")
+	}
+
+	// Wait for DB result
+	dbRes := <-dbCh
+	if dbRes.err != nil {
+		return nil, dbRes.err
+	}
+	if t != nil {
+		t.mark("open DB (parallel)")
+	}
+
+	aks := &AccountKeychains{
+		db:             dbRes.db,
+		defaultAccount: accountUUID,
+		accounts:       make(map[string]*AccountKeychain),
+		store:          store,
+	}
+
+	return aks, nil
+}
+
+// get returns the AccountKeychain for the given identifier (shorthand, UUID, email, or URL).
+// Pass "" to get the default account. Lazily opens accounts on first access.
+func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain, error) {
+	uuid := aks.defaultAccount
+	if identifier != "" && identifier != uuid {
+		// Resolve identifier to UUID
+		_, resolved, err := resolveAccountFromStore(aks.store, identifier)
+		if err != nil {
+			return nil, err
+		}
+		uuid = resolved
+	}
+
+	if ak, ok := aks.accounts[uuid]; ok {
+		return ak, nil
+	}
+
+	storedAcct, ok := aks.store.Accounts[uuid]
+	if !ok {
+		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
+	}
+
+	password, err := getCredentials(uuid)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		t.mark("get credentials (session check)")
+	}
+
+	accounts, err := getAccounts(aks.db)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		t.mark("get accounts")
+	}
+
+	var accountType string
+	for _, a := range accounts {
+		if a.AccountUUID == uuid {
+			accountType = a.AccountType
+			break
+		}
+	}
+
+	secretKey, err := getSecretKeyFromDB(aks.db, uuid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read secret key from database: %w", err)
+	}
+	if t != nil {
+		t.mark("read secret key (DB)")
+	}
+
+	ak, err := newAccountKeychain(aks.db, password, secretKey, storedAcct.Email, uuid, accountType, t)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		t.mark("init keychain (key derivation)")
+	}
+
+	aks.accounts[uuid] = ak
+	return ak, nil
+}
+
+func (aks *AccountKeychains) Close() {
+	aks.db.Close()
+}
+
+// AccountKeychain holds decrypted keys for accessing a single account's vault items.
 type AccountKeychain struct {
-	db              *sql.DB
+	db              *sql.DB                    // borrowed from AccountKeychains
 	accountUUID     string                     // 1Password account UUID
 	accountType     string                     // I=Individual, F=Family, T=Teams, B=Business
 	primaryKeysetID string                     // UUID of the primary keyset
@@ -557,10 +686,6 @@ func newAccountKeychain(db *sql.DB, password, secretKey, email, accountUUID, acc
 	}
 
 	return vk, nil
-}
-
-func (vk *AccountKeychain) Close() {
-	vk.db.Close()
 }
 
 // getKeysetRSAKey returns the RSA private key for a keyset, decrypting it if needed
@@ -848,103 +973,6 @@ func parseOPURI(uri string) (account, vault, item, section, field string, err er
 	}
 }
 
-// openAccountKeychain resolves account, gets credentials, and opens keychain.
-func openAccountKeychain(accountFlag string, t *timer) (*AccountKeychain, error) {
-	// Start DB open in background (pays cold-start cost in parallel with keychain)
-	type dbResult struct {
-		db  *sql.DB
-		err error
-	}
-	dbCh := make(chan dbResult, 1)
-	go func() {
-		db, err := openDB()
-		dbCh <- dbResult{db: db, err: err}
-	}()
-
-	// Meanwhile, do keychain operations (pays keychain cold-start cost)
-	accountUUID, err := resolveAccountUUID(accountFlag)
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		t.mark("resolve account")
-	}
-
-	store, err := GetStoredAccounts()
-	if err != nil {
-		return nil, err
-	}
-	storedAcct, ok := store.Accounts[accountUUID]
-	if !ok {
-		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
-	}
-	if t != nil {
-		t.mark("get stored accounts")
-	}
-
-	password, err := getCredentials(accountUUID)
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		t.mark("get credentials (session check)")
-	}
-
-	// Wait for DB result
-	dbRes := <-dbCh
-	if dbRes.err != nil {
-		return nil, dbRes.err
-	}
-	db := dbRes.db
-	if t != nil {
-		t.mark("open DB (parallel)")
-	}
-
-	accounts, err := getAccounts(db)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	if t != nil {
-		t.mark("get accounts")
-	}
-
-	var accountType string
-	var found bool
-	for _, a := range accounts {
-		if a.AccountUUID == accountUUID {
-			accountType = a.AccountType
-			found = true
-			break
-		}
-	}
-	if !found {
-		db.Close()
-		return nil, fmt.Errorf("account not found in database: %s", accountUUID)
-	}
-
-	// Read secret key from database
-	secretKey, err := getSecretKeyFromDB(db, accountUUID)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to read secret key from database: %w", err)
-	}
-	if t != nil {
-		t.mark("read secret key (DB)")
-	}
-
-	// Initialize keychain
-	vk, err := newAccountKeychain(db, password, secretKey, storedAcct.Email, accountUUID, accountType, t)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	if t != nil {
-		t.mark("init keychain (key derivation)")
-	}
-	return vk, nil
-}
-
 func cmdRead(uri string, accountFlag string) error {
 	t := newTimer()
 
@@ -954,27 +982,13 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 	t.mark("parse URI")
 
-	effectiveAccount := accountFlag
-	if account != "" {
-		effectiveAccount = account
-	}
-
-	vk, err := openAccountKeychain(effectiveAccount, t)
+	aks, err := openKeychains(accountFlag, t)
 	if err != nil {
 		return err
 	}
-	defer vk.Close()
+	defer aks.Close()
 
-	value, err := resolveRef(vk, vaultName, itemName, sectionName, fieldName, t)
-	if err != nil && account == "" && sectionName != "" {
-		// 4-part ambiguity: retry as account/vault/item/field
-		if vk2, err2 := openAccountKeychain(vaultName, t); err2 == nil {
-			defer vk2.Close()
-			if value2, err2 := resolveRef(vk2, itemName, sectionName, "", fieldName, t); err2 == nil {
-				value, err = value2, nil
-			}
-		}
-	}
+	value, err := resolveRef(aks, account, vaultName, itemName, sectionName, fieldName, t)
 	if err != nil {
 		return err
 	}
@@ -984,17 +998,38 @@ func cmdRead(uri string, accountFlag string) error {
 	return nil
 }
 
-// resolveRef resolves vault/item/[section/]field using a AccountKeychain.
-func resolveRef(vk *AccountKeychain, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
-	vaultUUID, err := vk.findVaultByName(vaultName, t)
+// resolveRef resolves [account/]vault/item/[section/]field using AccountKeychains.
+// Pass "" for account to use the default account.
+// For 4-part URIs (where account="" and section!=""), automatically tries the
+// account/vault/item/field interpretation as a fallback.
+func resolveRef(aks *AccountKeychains, account, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+	ak, err := aks.get(account, t)
 	if err != nil {
 		return "", err
 	}
-	item, err := vk.findItemByName(vaultUUID, itemName, t)
+
+	value, err := resolveRefFromAccount(ak, vaultName, itemName, sectionName, fieldName, t)
+	if err != nil && account == "" && sectionName != "" {
+		// 4-part ambiguity: retry as account/vault/item/field
+		if ak2, err2 := aks.get(vaultName, t); err2 == nil {
+			if value2, err2 := resolveRefFromAccount(ak2, itemName, sectionName, "", fieldName, t); err2 == nil {
+				return value2, nil
+			}
+		}
+	}
+	return value, err
+}
+
+func resolveRefFromAccount(ak *AccountKeychain, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
+	vaultUUID, err := ak.findVaultByName(vaultName, t)
 	if err != nil {
 		return "", err
 	}
-	decryptedItem, err := vk.decryptDetail(vaultUUID, &item.EncDetails)
+	item, err := ak.findItemByName(vaultUUID, itemName, t)
+	if err != nil {
+		return "", err
+	}
+	decryptedItem, err := ak.decryptDetail(vaultUUID, &item.EncDetails)
 	if err != nil {
 		return "", err
 	}
@@ -1121,13 +1156,14 @@ func findField(item *DecryptedItem, sectionName, fieldName string) (string, erro
 }
 
 func cmdList(accountFlag string) error {
-	vk, err := openAccountKeychain(accountFlag, nil)
+	aks, err := openKeychains(accountFlag, nil)
 	if err != nil {
 		return err
 	}
-	defer vk.Close()
+	defer aks.Close()
 
-	vaults, err := getVaults(vk.db, vk.accountUUID)
+	ak, _ := aks.get("", nil) // default account, already opened
+	vaults, err := getVaults(aks.db, ak.accountUUID)
 	if err != nil {
 		return err
 	}
@@ -1144,7 +1180,7 @@ func cmdList(accountFlag string) error {
 			continue
 		}
 
-		displayName, _, err := vk.decryptVaultName(&v)
+		displayName, _, err := ak.decryptVaultName(&v)
 		if err != nil {
 			// Show partial info for vaults we can't decrypt
 			entries = append(entries, vaultEntry{v.VaultUUID + " (decrypt failed)", v.VaultUUID})
@@ -1176,23 +1212,24 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	vaultName, itemName := parts[0], parts[1]
 
-	vk, err := openAccountKeychain(accountFlag, nil)
+	aks, err := openKeychains(accountFlag, nil)
 	if err != nil {
 		return err
 	}
-	defer vk.Close()
+	defer aks.Close()
 
-	vaultUUID, err := vk.findVaultByName(vaultName, nil)
-	if err != nil {
-		return err
-	}
-
-	item, err := vk.findItemByName(vaultUUID, itemName, nil)
+	ak, _ := aks.get("", nil) // default account, already opened
+	vaultUUID, err := ak.findVaultByName(vaultName, nil)
 	if err != nil {
 		return err
 	}
 
-	key, err := vk.getVaultKey(vaultUUID)
+	item, err := ak.findItemByName(vaultUUID, itemName, nil)
+	if err != nil {
+		return err
+	}
+
+	key, err := ak.getVaultKey(vaultUUID)
 	if err != nil {
 		return err
 	}
@@ -1294,17 +1331,17 @@ func cmdInject(args []string, accountFlag string) error {
 		uris[uri] = true
 	}
 
-	// Open vault keychain once for all lookups
-	vk, err := openAccountKeychain(accountFlag, nil)
+	// Open keychains for all lookups
+	aks, err := openKeychains(accountFlag, nil)
 	if err != nil {
 		return err
 	}
-	defer vk.Close()
+	defer aks.Close()
 
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
-		value, err := readSecret(vk, uri)
+		value, err := readSecret(aks, uri)
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", uri, err)
 		}
@@ -1419,15 +1456,15 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	// Resolve secrets if any
 	var secretValues []string
 	if len(secretRefs) > 0 || argsHaveRefs {
-		vk, err := openAccountKeychain(accountFlag, nil)
+		aks, err := openKeychains(accountFlag, nil)
 		if err != nil {
 			return 0, err
 		}
 
 		for name, uri := range secretRefs {
-			value, err := readSecret(vk, uri)
+			value, err := readSecret(aks, uri)
 			if err != nil {
-				vk.Close()
+				aks.Close()
 				return 0, fmt.Errorf("failed to resolve %s: %w", name, err)
 			}
 			secretValues = append(secretValues, value)
@@ -1445,9 +1482,9 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 				// Resolve each ref and collect for masking
 				resolved := arg
 				for _, uri := range refs {
-					value, err := readSecret(vk, uri)
+					value, err := readSecret(aks, uri)
 					if err != nil {
-						vk.Close()
+						aks.Close()
 						return 0, fmt.Errorf("failed to resolve arg %q: %w", uri, err)
 					}
 					secretValues = append(secretValues, value)
@@ -1457,7 +1494,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			}
 		}
 
-		vk.Close()
+		aks.Close()
 	}
 
 	// Build final environment slice
@@ -1683,36 +1720,13 @@ func printRunUsage() {
 	fmt.Fprintln(os.Stderr, "  Secret references can use $VAR syntax: op://$VAULT/item/field")
 }
 
-// readSecret reads a secret value from a URI using an already-opened vault keychain.
-// If the URI specifies an account, a separate AccountKeychain is opened for that account.
-// For 4-part URIs, the vault/item/section/field interpretation is tried first;
-// if it fails, the account/vault/item/field interpretation is tried as a fallback.
-func readSecret(vk *AccountKeychain, uri string) (string, error) {
+// readSecret reads a secret value from a URI, resolving account-qualified refs as needed.
+func readSecret(aks *AccountKeychains, uri string) (string, error) {
 	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
 	if err != nil {
 		return "", err
 	}
-
-	if account != "" {
-		vk2, err := openAccountKeychain(account, nil)
-		if err != nil {
-			return "", err
-		}
-		defer vk2.Close()
-		return resolveRef(vk2, vaultName, itemName, sectionName, fieldName, nil)
-	}
-
-	value, err := resolveRef(vk, vaultName, itemName, sectionName, fieldName, nil)
-	if err != nil && sectionName != "" {
-		// 4-part ambiguity: try account/vault/item/field
-		if vk2, err2 := openAccountKeychain(vaultName, nil); err2 == nil {
-			defer vk2.Close()
-			if value2, err2 := resolveRef(vk2, itemName, sectionName, "", fieldName, nil); err2 == nil {
-				return value2, nil
-			}
-		}
-	}
-	return value, err
+	return resolveRef(aks, account, vaultName, itemName, sectionName, fieldName, nil)
 }
 
 // parseRSAPrivateKey parses a JWK JSON into an RSA private key

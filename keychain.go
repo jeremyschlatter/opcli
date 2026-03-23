@@ -383,7 +383,11 @@ func ResolveAccount(identifier string) (*StoredAccount, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return resolveAccountFromStore(store, identifier)
+}
 
+// resolveAccountFromStore finds an account in a pre-loaded credential store.
+func resolveAccountFromStore(store *CredentialStore, identifier string) (*StoredAccount, string, error) {
 	// Check exact UUID match
 	if acct, ok := store.Accounts[identifier]; ok {
 		return acct, identifier, nil
