@@ -488,10 +488,16 @@ type AccountKeychains struct {
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
 	// Start DB open in background
-	dbCh := make(chan struct{ *sql.DB; error }, 1)
+	dbCh := make(chan struct {
+		*sql.DB
+		error
+	}, 1)
 	go func() {
 		db, err := openDB()
-		dbCh <- struct{ *sql.DB; error }{db, err}
+		dbCh <- struct {
+			*sql.DB
+			error
+		}{db, err}
 	}()
 
 	// Meanwhile, do keychain operations (pays keychain cold-start cost in parallel with DB)
@@ -1203,7 +1209,10 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	defer aks.Close()
 
-	ak, _ := aks.get("", nil) // default account, already opened
+	ak, err := aks.get("", nil) // default account
+	if err != nil {
+		return err
+	}
 	vaultUUID, err := ak.findVaultByName(vaultName, nil)
 	if err != nil {
 		return err
@@ -1704,7 +1713,6 @@ func printRunUsage() {
 	fmt.Fprintln(os.Stderr, "Variable substitution:")
 	fmt.Fprintln(os.Stderr, "  Secret references can use $VAR syntax: op://$VAULT/item/field")
 }
-
 
 // parseRSAPrivateKey parses a JWK JSON into an RSA private key
 func parseRSAPrivateKey(jwkJSON []byte) (*rsa.PrivateKey, error) {
