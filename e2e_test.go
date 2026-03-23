@@ -75,8 +75,9 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	// Create isolated data directory for sessions
 	dataDir := filepath.Join(tmpDir, "data")
 
-	// Each test env gets its own keychain namespace to avoid races
-	keychainService := fmt.Sprintf("opcli-test-%s", testDB.AccountUUID)
+	// Each test env gets its own keychain namespace to avoid races between
+	// TestE2E and TestE2E_Migrated (which run in parallel).
+	keychainService := fmt.Sprintf("opcli-test-%s", filepath.Base(tmpDir))
 
 	env := &testEnv{
 		binPath:         binPath,
