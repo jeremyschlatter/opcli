@@ -947,30 +947,6 @@ func (vk *AccountKeychain) findItemByName(vaultUUID, itemName string, t *timer) 
 	return nil, fmt.Errorf("item not found: %s", itemName)
 }
 
-// parseOPURI parses an op://[account/]vault/item/[section/]field URI.
-// For 4-part URIs, the result is ambiguous between vault/item/section/field
-// and account/vault/item/field. This function defaults to the former; callers
-// must handle the fallback to the latter.
-func parseOPURI(uri string) (account, vault, item, section, field string, err error) {
-	if !strings.HasPrefix(uri, "op://") {
-		return "", "", "", "", "", fmt.Errorf("invalid URI: must start with op://")
-	}
-
-	parts := strings.Split(uri[5:], "/")
-	switch len(parts) {
-	case 3:
-		return "", parts[0], parts[1], "", parts[2], nil
-	case 4:
-		// Ambiguous: could be vault/item/section/field or account/vault/item/field.
-		// Default to vault/item/section/field; callers handle fallback.
-		return "", parts[0], parts[1], parts[2], parts[3], nil
-	case 5:
-		return parts[0], parts[1], parts[2], parts[3], parts[4], nil
-	default:
-		return "", "", "", "", "", fmt.Errorf("invalid URI: expected op://vault/item/field, op://vault/item/section/field, op://account/vault/item/field, or op://account/vault/item/section/field")
-	}
-}
-
 func cmdRead(uri string, accountFlag string) error {
 	t := newTimer()
 
@@ -990,23 +966,36 @@ func cmdRead(uri string, accountFlag string) error {
 	return nil
 }
 
-// resolveRef parses an op:// URI and resolves it to a secret value.
+// resolveRef parses an op://[account/]vault/item/[section/]field URI and
+// resolves it to a secret value.
 // For 4-part URIs (ambiguous between vault/item/section/field and
 // account/vault/item/field), tries the section interpretation first.
 func resolveRef(aks *AccountKeychains, uri string, t *timer) (string, error) {
-	account, vaultName, itemName, sectionName, fieldName, err := parseOPURI(uri)
-	if err != nil {
-		return "", err
+	if !strings.HasPrefix(uri, "op://") {
+		return "", fmt.Errorf("invalid URI: must start with op://")
 	}
+	parts := strings.Split(uri[5:], "/")
 
-	value, err := resolveRefFromAccount(aks, account, vaultName, itemName, sectionName, fieldName, t)
-	if err != nil && account == "" && sectionName != "" {
-		// 4-part ambiguity: retry as account/vault/item/field
-		if value2, err2 := resolveRefFromAccount(aks, vaultName, itemName, sectionName, "", fieldName, t); err2 == nil {
-			return value2, nil
+	switch len(parts) {
+	case 3:
+		// op://vault/item/field
+		return resolveRefFromAccount(aks, "", parts[0], parts[1], "", parts[2], t)
+	case 4:
+		// Ambiguous: vault/item/section/field or account/vault/item/field.
+		// Try section interpretation first.
+		value, err := resolveRefFromAccount(aks, "", parts[0], parts[1], parts[2], parts[3], t)
+		if err != nil {
+			if value2, err2 := resolveRefFromAccount(aks, parts[0], parts[1], parts[2], "", parts[3], t); err2 == nil {
+				return value2, nil
+			}
 		}
+		return value, err
+	case 5:
+		// op://account/vault/item/section/field
+		return resolveRefFromAccount(aks, parts[0], parts[1], parts[2], parts[3], parts[4], t)
+	default:
+		return "", fmt.Errorf("invalid URI: expected op://vault/item/field, op://vault/item/section/field, op://account/vault/item/field, or op://account/vault/item/section/field")
 	}
-	return value, err
 }
 
 func resolveRefFromAccount(aks *AccountKeychains, account, vaultName, itemName, sectionName, fieldName string, t *timer) (string, error) {
