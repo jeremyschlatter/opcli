@@ -189,10 +189,12 @@ func saveSessions(store *SessionStore) error {
 		return err
 	}
 
-	// TODO: This write is not atomic — concurrent opcli invocations can
-	// corrupt the session store (seen as flaky "failed to parse session store"
-	// errors in CI). Fix when reworking session storage.
-	return os.WriteFile(path, data, 0600)
+	// Atomic write: write to temp file then rename
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // computeSessionMAC computes HMAC for session data using the Keychain secret.
