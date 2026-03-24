@@ -72,11 +72,48 @@ type URLEntry struct {
 	Label string `json:"l,omitempty"`
 }
 
-// DecryptedItem is the decrypted item details
+// DecryptedItem is the decrypted item details.
+// Some 1Password item types (e.g. Password) store data as top-level JSON keys
+// rather than in the "fields" array. These are captured in Extras.
 type DecryptedItem struct {
-	ItemUUID string  `json:"itemUUID"`
-	Fields   []Field `json:"fields,omitempty"`
+	ItemUUID string    `json:"itemUUID"`
+	Fields   []Field   `json:"fields,omitempty"`
 	Sections []Section `json:"sections,omitempty"`
+	Extras   map[string]string `json:"-"` // top-level string keys not in fields/sections
+}
+
+// knownItemKeys are the JSON keys handled by DecryptedItem's typed fields.
+var knownItemKeys = map[string]bool{
+	"itemUUID": true, "fields": true, "sections": true,
+}
+
+func (d *DecryptedItem) UnmarshalJSON(data []byte) error {
+	// First unmarshal the known fields via an alias to avoid recursion.
+	type Alias DecryptedItem
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*d = DecryptedItem(alias)
+
+	// Then capture any extra top-level string values.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k, v := range raw {
+		if knownItemKeys[k] {
+			continue
+		}
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			if d.Extras == nil {
+				d.Extras = make(map[string]string)
+			}
+			d.Extras[k] = s
+		}
+	}
+	return nil
 }
 
 type Field struct {

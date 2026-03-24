@@ -181,24 +181,27 @@ type testDBAccountYAML struct {
 	Vaults []struct {
 		Name  string `yaml:"name"`
 		Type  string `yaml:"type"`
-		Items []struct {
-			Title  string `yaml:"title"`
-			Fields []struct {
-				Name  string `yaml:"name"`
-				Type  string `yaml:"type"`
-				Value any    `yaml:"value"`
-			} `yaml:"fields"`
-			Sections []struct {
-				Name   string `yaml:"name"`
-				Title  string `yaml:"title"`
-				Fields []struct {
-					Name  string `yaml:"name"`
-					Type  string `yaml:"type"`
-					Value any    `yaml:"value"`
-				} `yaml:"fields"`
-			} `yaml:"sections"`
-		} `yaml:"items"`
+		Items []testDBItemYAML `yaml:"items"`
 	} `yaml:"vaults"`
+}
+
+type testDBItemYAML struct {
+	Title      string `yaml:"title"`
+	DetailsJSON string `yaml:"details_json"` // raw JSON for item details (overrides fields/sections)
+	Fields []struct {
+		Name  string `yaml:"name"`
+		Type  string `yaml:"type"`
+		Value any    `yaml:"value"`
+	} `yaml:"fields"`
+	Sections []struct {
+		Name   string `yaml:"name"`
+		Title  string `yaml:"title"`
+		Fields []struct {
+			Name  string `yaml:"name"`
+			Type  string `yaml:"type"`
+			Value any    `yaml:"value"`
+		} `yaml:"fields"`
+	} `yaml:"sections"`
 }
 
 // testAccountKeys holds the generated key material for a test account.
@@ -316,23 +319,34 @@ func createVaultsAndItems(db *sql.DB, acct *TestAccount, keys *testAccountKeys, 
 		acct.Vaults[vaultSpec.Name] = vault
 
 		for _, itemSpec := range vaultSpec.Items {
-			var fields []Field
-			for _, f := range itemSpec.Fields {
-				fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: fmt.Sprintf("%v", f.Value)})
-			}
-			var sections []Section
-			for _, s := range itemSpec.Sections {
-				var sectionFields []Field
-				for _, f := range s.Fields {
-					v, _ := json.Marshal(f.Value)
-					sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: v})
+			var detailsJSON []byte
+			if itemSpec.DetailsJSON != "" {
+				detailsJSON = []byte(itemSpec.DetailsJSON)
+			} else {
+				var fields []Field
+				for _, f := range itemSpec.Fields {
+					fields = append(fields, Field{Name: f.Name, Type: f.Type, Value: fmt.Sprintf("%v", f.Value)})
 				}
-				sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
+				var sections []Section
+				for _, s := range itemSpec.Sections {
+					var sectionFields []Field
+					for _, f := range s.Fields {
+						v, _ := json.Marshal(f.Value)
+						sectionFields = append(sectionFields, Field{T: f.Name, N: f.Name, K: f.Type, V: v})
+					}
+					sections = append(sections, Section{Name: s.Name, Title: s.Title, Fields: sectionFields})
+				}
+				details := DecryptedItem{
+					ItemUUID: fmt.Sprintf("item-%s-uuid", itemSpec.Title),
+					Fields:   fields,
+					Sections: sections,
+				}
+				detailsJSON, _ = json.Marshal(details)
 			}
 			if fromV1 {
-				err = addTestItemV5(db, vault, itemSpec.Title, fields, sections)
+				err = addTestItemV5(db, vault, itemSpec.Title, detailsJSON)
 			} else {
-				err = addTestItem(db, acct.UUID, vault, itemSpec.Title, fields, sections)
+				err = addTestItem(db, acct.UUID, vault, itemSpec.Title, detailsJSON)
 			}
 			if err != nil {
 				return fmt.Errorf("failed to add item %s: %w", itemSpec.Title, err)
@@ -532,7 +546,7 @@ func createTestVault(db *sql.DB, accountUUID, name, vaultType, keysetUUID string
 	}, nil
 }
 
-func addTestItem(db *sql.DB, accountUUID string, vault *TestVault, title string, fields []Field, sections []Section) error {
+func addTestItem(db *sql.DB, accountUUID string, vault *TestVault, title string, detailsJSON []byte) error {
 	itemUUID := fmt.Sprintf("item-%s-uuid", title)
 
 	// Create overview
@@ -543,13 +557,6 @@ func addTestItem(db *sql.DB, accountUUID string, vault *TestVault, title string,
 		return err
 	}
 
-	// Create details
-	details := DecryptedItem{
-		ItemUUID: itemUUID,
-		Fields:   fields,
-		Sections: sections,
-	}
-	detailsJSON, _ := json.Marshal(details)
 	encDetails, err := createEncryptedData(detailsJSON, vault.key, vault.UUID)
 	if err != nil {
 		return err
@@ -581,8 +588,11 @@ func addTestItem(db *sql.DB, accountUUID string, vault *TestVault, title string,
 		Title:  title,
 		Fields: make(map[string]string),
 	}
-	for _, f := range fields {
-		vault.Items[title].Fields[f.Name] = f.Value
+	var parsed DecryptedItem
+	if json.Unmarshal(detailsJSON, &parsed) == nil {
+		for _, f := range parsed.Fields {
+			vault.Items[title].Fields[f.Name] = f.Value
+		}
 	}
 
 	return nil
@@ -645,7 +655,7 @@ func createTestVaultV5(db *sql.DB, accountID int64, name, vaultType, keysetUUID 
 }
 
 // addTestItemV5 adds an item in the old v5-era schema (item_overviews + item_details tables).
-func addTestItemV5(db *sql.DB, vault *TestVault, title string, fields []Field, sections []Section) error {
+func addTestItemV5(db *sql.DB, vault *TestVault, title string, detailsJSON []byte) error {
 	itemUUID := fmt.Sprintf("item-%s-uuid", title)
 
 	overview := DecryptedOverview{Title: title}
@@ -655,12 +665,6 @@ func addTestItemV5(db *sql.DB, vault *TestVault, title string, fields []Field, s
 		return err
 	}
 
-	details := DecryptedItem{
-		ItemUUID: itemUUID,
-		Fields:   fields,
-		Sections: sections,
-	}
-	detailsJSON, _ := json.Marshal(details)
 	encDetails, err := createEncryptedData(detailsJSON, vault.key, vault.UUID)
 	if err != nil {
 		return err
@@ -687,8 +691,11 @@ func addTestItemV5(db *sql.DB, vault *TestVault, title string, fields []Field, s
 		Title:  title,
 		Fields: make(map[string]string),
 	}
-	for _, f := range fields {
-		vault.Items[title].Fields[f.Name] = f.Value
+	var parsed DecryptedItem
+	if json.Unmarshal(detailsJSON, &parsed) == nil {
+		for _, f := range parsed.Fields {
+			vault.Items[title].Fields[f.Name] = f.Value
+		}
 	}
 	return nil
 }

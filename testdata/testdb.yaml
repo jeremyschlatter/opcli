@@ -59,6 +59,8 @@ accounts:
                       item:
                         vaultUuid: "fake-vault-uuid-1234"
                         itemUuid: "fake-item-uuid-5678"
+          - title: Test Password Item
+            details_json: '{"password": "my-top-level-password"}'
       - name: Work
         type: U
         items:

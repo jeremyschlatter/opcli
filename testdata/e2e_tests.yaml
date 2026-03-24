@@ -38,6 +38,10 @@ read:
     args: [read, "op://Private/Test Object Field/tokens/example"]
     out: "example-token-value\n"
 
+  - name: read top-level field (no fields array)
+    args: [read, "op://Private/Test Password Item/password"]
+    out: "my-top-level-password\n"
+
   - name: field not found
     args: [read, "op://Private/Test Login/nosuchfield"]
     errSuffix: "Error: field not found: nosuchfield\n"

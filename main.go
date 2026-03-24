@@ -1111,6 +1111,22 @@ func findField(item *DecryptedItem, sectionName, fieldName string) (string, erro
 		}
 	}
 
+	// Fallback to extras (top-level keys) only when there's no fields array.
+	// This handles Password items created without a username field, where
+	// 1Password stores the password as a top-level JSON key instead.
+	if len(matches) == 0 && len(item.Fields) == 0 {
+		if v, ok := item.Extras[fieldName]; ok {
+			matches = append(matches, match{value: v, section: ""})
+		} else {
+			lower := strings.ToLower(fieldName)
+			for k, v := range item.Extras {
+				if strings.ToLower(k) == lower {
+					matches = append(matches, match{value: v, section: ""})
+				}
+			}
+		}
+	}
+
 	if len(matches) == 0 {
 		return "", fmt.Errorf("field not found: %s", fieldName)
 	}
