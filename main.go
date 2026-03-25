@@ -868,7 +868,7 @@ func (vk *AccountKeychain) decryptVaultName(v *Vault) (displayName, rawName stri
 }
 
 // findVaultByName finds a vault by name or UUID.
-func (vk *AccountKeychain) findVaultByName(vaultName string, t *timer) (string, error) {
+func (vk *AccountKeychain) findVaultByName(vaultName string, displayOnly bool, t *timer) (string, error) {
 	vaults, err := getVaults(vk.db, vk.accountUUID)
 	if err != nil {
 		return "", err
@@ -918,7 +918,7 @@ func (vk *AccountKeychain) findVaultByName(vaultName string, t *timer) (string, 
 
 	// Find match
 	for _, r := range decrypted {
-		if r.uuid != "" && (strings.EqualFold(r.displayName, vaultName) || strings.EqualFold(r.rawName, vaultName)) {
+		if r.uuid != "" && (strings.EqualFold(r.displayName, vaultName) || !displayOnly && strings.EqualFold(r.rawName, vaultName)) {
 			return r.uuid, nil
 		}
 	}
@@ -972,35 +972,33 @@ func cmdRead(uri string, accountFlag string) error {
 	return nil
 }
 
-// resolveRef parses an op://[account/]vault/item/[section/]field URI and
+// resolveRef parses an op://[account:]vault/item/[section/]field URI and
 // resolves it to a secret value.
-// For 4-part URIs (ambiguous between vault/item/section/field and
-// account/vault/item/field), tries the section interpretation first.
 func resolveRef(aks *AccountKeychains, uri string, t *timer) (string, error) {
 	if !strings.HasPrefix(uri, "op://") {
 		return "", fmt.Errorf("invalid URI: must start with op://")
 	}
-	parts := strings.Split(uri[5:], "/")
+	path := uri[5:]
 
+	// Extract optional account prefix (account:vault/...)
+	var account string
+	colon := strings.Index(path, ":")
+	slash := strings.Index(path, "/")
+	if colon != -1 && (slash == -1 || colon < slash) {
+		account = path[:colon]
+		path = path[colon+1:]
+	}
+
+	parts := strings.Split(path, "/")
 	switch len(parts) {
 	case 3:
-		// op://vault/item/field
-		return resolveRefFromAccount(aks, "", parts[0], parts[1], "", parts[2], t)
+		// vault/item/field
+		return resolveRefFromAccount(aks, account, parts[0], parts[1], "", parts[2], t)
 	case 4:
-		// Ambiguous: vault/item/section/field or account/vault/item/field.
-		// Try section interpretation first.
-		value, err := resolveRefFromAccount(aks, "", parts[0], parts[1], parts[2], parts[3], t)
-		if err != nil {
-			if value2, err2 := resolveRefFromAccount(aks, parts[0], parts[1], parts[2], "", parts[3], t); err2 == nil {
-				return value2, nil
-			}
-		}
-		return value, err
-	case 5:
-		// op://account/vault/item/section/field
-		return resolveRefFromAccount(aks, parts[0], parts[1], parts[2], parts[3], parts[4], t)
+		// vault/item/section/field
+		return resolveRefFromAccount(aks, account, parts[0], parts[1], parts[2], parts[3], t)
 	default:
-		return "", fmt.Errorf("invalid URI: expected op://vault/item/field, op://vault/item/section/field, op://account/vault/item/field, or op://account/vault/item/section/field")
+		return "", fmt.Errorf("invalid URI: expected op://[account:]vault/item/[section/]field")
 	}
 }
 
@@ -1009,7 +1007,40 @@ func resolveRefFromAccount(aks *AccountKeychains, account, vaultName, itemName, 
 	if err != nil {
 		return "", err
 	}
-	vaultUUID, err := ak.findVaultByName(vaultName, t)
+	autoAccount := account == "" && os.Getenv("OPCLI_AUTO_ACCOUNT") != ""
+	vaultUUID, err := ak.findVaultByName(vaultName, autoAccount, t)
+	if err != nil && autoAccount {
+		// Vault not found in default account — try other signed-in accounts (display name only).
+		var matches []struct {
+			ak        *AccountKeychain
+			vaultUUID string
+		}
+		for uuid := range aks.store.Accounts {
+			if uuid == aks.defaultAccount {
+				continue
+			}
+			otherAK, err2 := aks.get(uuid, t)
+			if err2 != nil {
+				continue
+			}
+			if vid, err2 := otherAK.findVaultByName(vaultName, true, t); err2 == nil {
+				matches = append(matches, struct {
+					ak        *AccountKeychain
+					vaultUUID string
+				}{otherAK, vid})
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return "", err // original error
+		case 1:
+			ak = matches[0].ak
+			vaultUUID = matches[0].vaultUUID
+			err = nil
+		default:
+			return "", fmt.Errorf("vault %q found in multiple accounts; specify account with op://account:%s/...", vaultName, vaultName)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -1229,7 +1260,7 @@ func cmdGet(uri string, accountFlag string) error {
 	if err != nil {
 		return err
 	}
-	vaultUUID, err := ak.findVaultByName(vaultName, nil)
+	vaultUUID, err := ak.findVaultByName(vaultName, false, nil)
 	if err != nil {
 		return err
 	}
@@ -1319,7 +1350,7 @@ func cmdInject(args []string, accountFlag string) error {
 	// Allowed chars in references: a-zA-Z0-9, -, _, ., space, and / (path separator)
 	// References end at any unsupported character (quotes, newlines, brackets, etc.)
 	// The final character must be non-space to avoid capturing trailing spaces
-	pattern := regexp.MustCompile(`\{\{\s*(op://[^}]*[^\s}])\s*\}\}|(op://[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-])`)
+	pattern := regexp.MustCompile(`\{\{\s*(op://[^}]*[^\s}])\s*\}\}|(op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-])`)
 	matches := pattern.FindAllStringSubmatch(string(input), -1)
 
 	if len(matches) == 0 {
@@ -1483,7 +1514,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 
 		if argsHaveRefs {
 			// Same pattern as inject's bare ref matching
-			opRefPattern := regexp.MustCompile(`op://[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
+			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
 			for i, arg := range cmdArgs {
 				refs := opRefPattern.FindAllString(arg, -1)
 				if len(refs) == 0 {

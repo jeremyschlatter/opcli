@@ -47,47 +47,37 @@ read:
     errSuffix: "Error: field not found: nosuchfield\n"
     code: 1
 
-  # Account-qualified refs (4-part: account/vault/item/field)
+  # Account-qualified refs (colon syntax: account:vault/item/field)
   - name: account-qualified ref via shorthand
-
-    args: [read, "op://work/Shared/Work Login/password"]
+    args: [read, "op://work:Shared/Work Login/password"]
     out: "work-secret-456\n"
 
   - name: account-qualified ref to default account
-
-    args: [read, "op://my/Private/Test Login/password"]
+    args: [read, "op://my:Private/Test Login/password"]
     out: "secret123\n"
 
-  # 4-part disambiguation: vault/item/section/field wins over account/vault/item/field
-  - name: 4-part prefers section over account
+  # 4-part: vault/item/section/field (no longer ambiguous with colon syntax)
+  - name: 4-part section ref
     args: [read, "op://Private/Test Sectioned/server/hostname"]
     out: "example.com\n"
 
-  # Ambiguous 4-part where both interpretations resolve to a valid item.
-  # Default account is "my", which has vault "Work" with item "work", section "work", field "field".
-  # Account "work" also has vault "work" with item "work", field "field" (no section).
-  # Section interpretation (default account) wins.
-  - name: 4-part ambiguous prefers section over account
+  - name: 4-part section ref in non-default account
     args: [read, "op://work/work/work/field"]
     out: "my account field\n"
 
-  # Same ref, but with OP_ACCOUNT=work. Now the default account is "work", which also
-  # has vault "work" with item "work", section "work", field "field" — so section still wins.
-  - name: 4-part ambiguous with OP_ACCOUNT prefers section
+  - name: 4-part section ref with OP_ACCOUNT
     args: [read, "op://work/work/work/field"]
     env:
       OP_ACCOUNT: work
     out: "work account field\n"
 
-  # 5-part is unambiguous: account/vault/item/section/field
-  - name: 5-part reads from explicit account
-    args: [read, "op://work/work/work/work/field"]
+  # Account-qualified refs using colon syntax
+  - name: account-qualified ref
+    args: [read, "op://work:work/work/work/field"]
     out: "work account field\n"
 
-  # Account-qualified refs (5-part: account/vault/item/section/field)
-  - name: 5-part account-qualified ref with section
-
-    args: [read, "op://my/Private/Test Sectioned/server/hostname"]
+  - name: account-qualified ref with section
+    args: [read, "op://my:Private/Test Sectioned/server/hostname"]
     out: "example.com\n"
 
 inject:
@@ -164,9 +154,8 @@ inject:
     code: 1
 
   - name: inject with account-qualified ref
-
     args: [inject]
-    stdin: "secret={{ op://work/Shared/Work Login/password }}"
+    stdin: "secret={{ op://work:Shared/Work Login/password }}"
     out: secret=work-secret-456
 
   - name: inject file
@@ -345,10 +334,9 @@ run:
 
   # Account-qualified refs in env vars
   - name: resolve account-qualified env var
-
     args: [run, --no-masking, --, printenv, WORK_PASS]
     env:
-      WORK_PASS: "op://work/Shared/Work Login/password"
+      WORK_PASS: "op://work:Shared/Work Login/password"
     out: "work-secret-456\n"
 
   # Error cases

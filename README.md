@@ -50,8 +50,8 @@ opcli read "op://VaultName/ItemName/fieldname"
 opcli read "op://VaultName/ItemName/SectionName/fieldname"
 
 # Read from a specific account (by shorthand, email, UUID, or URL)
-opcli read "op://AccountName/VaultName/ItemName/fieldname"
-opcli read "op://AccountName/VaultName/ItemName/SectionName/fieldname"
+opcli read "op://AccountName:VaultName/ItemName/fieldname"
+opcli read "op://AccountName:VaultName/ItemName/SectionName/fieldname"
 
 # List all vaults
 opcli list
@@ -66,16 +66,16 @@ opcli signout
 ### Secret reference format
 
 ```
-op://[account/]vault/item/[section/]field
+op://[account:]vault/item/[section/]field
 ```
 
-> **Note:** The optional `account` prefix is an opcli extension. The official 1Password CLI (`op`) does not support account names in `op://` references — it uses the `--account` flag or `OP_ACCOUNT` env var instead. opcli supports those too, but embedding the account in the reference is often more convenient.
-
-References with four path components are ambiguous: `op://A/B/C/D` could be either `vault/item/section/field` or `account/vault/item/field`. When both interpretations resolve to a valid item, the section interpretation takes priority (matching the behavior of refs without an account). The account interpretation is tried as a fallback only when the section interpretation fails.
-
-Five-component references are unambiguous: `op://account/vault/item/section/field`.
+> **Note:** The optional `account:` prefix is an opcli extension. The official 1Password CLI (`op`) does not support account names in `op://` references — it uses the `--account` flag or `OP_ACCOUNT` env var instead. opcli supports those too, but embedding the account in the reference is often more convenient.
 
 Account-qualified references work everywhere `op://` refs are supported: `read`, `inject`, `run` (env vars, `--env-file`, and arg substitution).
+
+### Auto-resolving accounts (`OPCLI_AUTO_ACCOUNT`)
+
+Set `OPCLI_AUTO_ACCOUNT=1` to automatically resolve which account a vault belongs to when no account is specified. If the vault name is unambiguous across your signed-in accounts, opcli will use the correct one. If the vault exists in multiple accounts, you'll get an error asking you to specify the account explicitly.
 
 ## Security
 
