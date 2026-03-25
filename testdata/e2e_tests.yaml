@@ -80,6 +80,21 @@ read:
     args: [read, "op://my:Private/Test Sectioned/server/hostname"]
     out: "example.com\n"
 
+  # OPCLI_AUTO_ACCOUNT
+  - name: wrong account without auto-account fails
+    args: [read, "op://Shared/Work Login/password"]
+    env:
+      OP_ACCOUNT: my
+    errSuffix: "Error: vault not found: Shared\n"
+    code: 1
+
+  - name: wrong account with auto-account succeeds
+    args: [read, "op://Shared/Work Login/password"]
+    env:
+      OP_ACCOUNT: my
+      OPCLI_AUTO_ACCOUNT: "1"
+    out: "work-secret-456\n"
+
 inject:
   # Braced references
   - name: braced reference with spaces
