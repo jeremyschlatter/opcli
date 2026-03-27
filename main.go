@@ -468,10 +468,22 @@ func getCredentials(accountUUID string) (password string, err error) {
 			return "", fmt.Errorf("authentication failed: %w", err)
 		}
 
-		// Create session
-		if _, err := CreateSession(accountUUID); err != nil {
-			// Non-fatal, continue without session
-			fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
+		// When OPCLI_AUTO_ACCOUNT is enabled, create sessions for all stored accounts
+		// so the user only needs to authenticate once via TouchID.
+		if os.Getenv("OPCLI_AUTO_ACCOUNT") != "" {
+			if store, err := GetStoredAccounts(); err == nil {
+				for uuid := range store.Accounts {
+					if _, err := CreateSession(uuid); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: could not create session for account: %v\n", err)
+					}
+				}
+			}
+		} else {
+			// Create session for just this account
+			if _, err := CreateSession(accountUUID); err != nil {
+				// Non-fatal, continue without session
+				fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
+			}
 		}
 	}
 

@@ -327,6 +327,44 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 	}
 }
 
+func TestE2E_AutoAccountSessionCoversAll(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+
+	// Use a fresh session key so no sessions exist yet
+	freshSessionKey := "auto-account-session-test"
+
+	// Clear any existing sessions by removing the sessions file
+	sessionsFile := filepath.Join(env.dataDir, "sessions.json")
+	os.Remove(sessionsFile)
+
+	// Run a command that uses OPCLI_AUTO_ACCOUNT to access a vault
+	// from a non-default account. This should create sessions for ALL accounts.
+	_, _, code := env.runCLI("", "", map[string]string{
+		"OPCLI_AUTO_ACCOUNT":       "1",
+		"OP_ACCOUNT":               "my",
+		"OPCLI_TEST_SESSION_KEY":   freshSessionKey,
+	}, "read", "op://Shared/Work Login/password")
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+
+	// Read the sessions file and verify sessions exist for all accounts
+	data, err := os.ReadFile(sessionsFile)
+	if err != nil {
+		t.Fatalf("failed to read sessions file: %v", err)
+	}
+
+	// Verify that sessions were created for both accounts
+	for _, acct := range env.testDB.Accounts {
+		expectedKey := freshSessionKey + ":" + acct.UUID
+		if !strings.Contains(string(data), acct.UUID) {
+			t.Errorf("session not created for account %s (%s); sessions file: %s", acct.Shorthand, acct.UUID, string(data))
+		}
+		_ = expectedKey
+	}
+}
+
 func TestE2E_TouchIDFail(t *testing.T) {
 	// This test requires a fresh session (no cached auth) and TouchID to fail.
 	// Since our test setup creates a session via keychain storage, we'd need
