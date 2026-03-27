@@ -10,3 +10,5 @@ opcli-test
 
 # Local files
 .claude/
+.beads/
+.runtime/
