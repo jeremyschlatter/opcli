@@ -69,35 +69,43 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 // Defined in touchid.m, linked via libtouchid.a
 extern int authenticateTouchID(const char *reason);
 
-// Add or update a keychain item with app-only access
+// Add or update a keychain item with app-only access.
+// Uses SecItemUpdate for existing items (atomic, no race window)
+// and falls back to SecItemAdd for new items.
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
     CFStringRef serviceRef = createCFString(service);
     CFStringRef accountRef = createCFString(account);
     CFDataRef passwordRef = CFDataCreate(NULL, (const UInt8 *)password, passwordLen);
 
-    // Delete existing item first to reset ACL
-    CFMutableDictionaryRef deleteQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(deleteQuery, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(deleteQuery, kSecAttrService, serviceRef);
-    CFDictionarySetValue(deleteQuery, kSecAttrAccount, accountRef);
-    SecItemDelete(deleteQuery);
-    CFRelease(deleteQuery);
-
-    // Create app-only access
-    SecAccessRef access = createAppOnlyAccess("opcli credentials");
-
-    // Add new item
+    // Build query to find existing item
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(query, kSecAttrService, serviceRef);
     CFDictionarySetValue(query, kSecAttrAccount, accountRef);
-    CFDictionarySetValue(query, kSecValueData, passwordRef);
+
+    // Create app-only access
+    SecAccessRef access = createAppOnlyAccess("opcli credentials");
+
+    // Build attributes to update
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attrs, kSecValueData, passwordRef);
     if (access != NULL) {
-        CFDictionarySetValue(query, kSecAttrAccess, access);
+        CFDictionarySetValue(attrs, kSecAttrAccess, access);
     }
 
-    OSStatus status = SecItemAdd(query, NULL);
+    // Try atomic update first — concurrent readers always see a valid item
+    OSStatus status = SecItemUpdate(query, attrs);
 
+    if (status == errSecItemNotFound) {
+        // Item doesn't exist yet — add it
+        CFDictionarySetValue(query, kSecValueData, passwordRef);
+        if (access != NULL) {
+            CFDictionarySetValue(query, kSecAttrAccess, access);
+        }
+        status = SecItemAdd(query, NULL);
+    }
+
+    CFRelease(attrs);
     CFRelease(query);
     if (access) CFRelease(access);
     CFRelease(serviceRef);
@@ -229,6 +237,15 @@ func keychainGet(account string) (string, error) {
 		t0 = time.Now()
 	}
 	status := C.keychainGet(cService, cAccount, &outPassword, &outLen)
+	if status == -25300 { // errSecItemNotFound — retry with backoff (defense-in-depth)
+		for _, delay := range []time.Duration{50 * time.Millisecond, 150 * time.Millisecond} {
+			time.Sleep(delay)
+			status = C.keychainGet(cService, cAccount, &outPassword, &outLen)
+			if status != -25300 {
+				break
+			}
+		}
+	}
 	if os.Getenv("OPCLI_TIMING") != "" {
 		fmt.Fprintf(os.Stderr, "      [keychainGet %q: %.2fms]\n", account, float64(time.Since(t0).Microseconds())/1000)
 	}

@@ -63,14 +63,9 @@ func TestKeychainConcurrentRead(t *testing.T) {
 	}
 }
 
-// TestKeychainConcurrentReadWrite reproduces the errSecItemNotFound race.
-//
-// keychainSet does SecItemDelete then SecItemAdd. Between those two calls,
-// the keychain item does not exist. Concurrent keychainGet calls during
-// that window get errSecItemNotFound (-25300).
-//
-// This test runs readers and writers concurrently to trigger the race.
-// With the retry workaround removed, failures here confirm the bug is real.
+// TestKeychainConcurrentReadWrite verifies that keychainSet's atomic update
+// (SecItemUpdate) eliminates the errSecItemNotFound race. Concurrent readers
+// should never see "not found" while writers are updating the same item.
 func TestKeychainConcurrentReadWrite(t *testing.T) {
 	if !tryKeychainAccess() {
 		t.Skip("keychain not accessible (binary may be unsigned)")
@@ -131,9 +126,8 @@ func TestKeychainConcurrentReadWrite(t *testing.T) {
 		rs, total, rf, wf)
 
 	if rf > 0 {
-		t.Logf("CONFIRMED: %d read failures under concurrent read/write — "+
-			"this is the delete-then-add race in keychainSet (errSecItemNotFound during "+
-			"the window between SecItemDelete and SecItemAdd)", rf)
+		t.Errorf("%d/%d reads failed under concurrent read/write — "+
+			"keychainSet should use atomic SecItemUpdate, not delete-then-add", rf, total)
 	}
 }
 
@@ -184,7 +178,7 @@ func TestE2E_KeychainConcurrent(t *testing.T) {
 	t.Logf("E2E concurrent results: %d/%d succeeded, %d failures", s, total, f)
 
 	if f > 0 {
-		t.Logf("CONFIRMED at e2e level: %d/%d CLI invocations failed under concurrency — "+
-			"consistent with the delete-then-add race in keychainSet", f, total)
+		t.Errorf("%d/%d CLI invocations failed under concurrent access — "+
+			"keychainSet should use atomic SecItemUpdate", f, total)
 	}
 }
