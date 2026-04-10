@@ -496,6 +496,7 @@ type AccountKeychains struct {
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
+	pendingRefs    []string                    // op:// refs to display at TouchID prompt
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
@@ -546,6 +547,24 @@ func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
 	}, nil
 }
 
+// printPendingRefs prints the pending op:// refs to stderr before TouchID authentication.
+// Shows up to 8 refs, with a summary line if there are more.
+func (aks *AccountKeychains) printPendingRefs() {
+	if len(aks.pendingRefs) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "opcli: authenticating to read:\n")
+	limit := 8
+	for i, ref := range aks.pendingRefs {
+		if i >= limit {
+			fmt.Fprintf(os.Stderr, "  ... and %d more\n", len(aks.pendingRefs)-limit)
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  %s\n", ref)
+	}
+	aks.pendingRefs = nil
+}
+
 // get returns the AccountKeychain for the given identifier (shorthand, UUID, email, or URL).
 // Pass "" to get the default account. Lazily opens accounts on first access.
 func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain, error) {
@@ -566,6 +585,11 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 	storedAcct, ok := aks.store.Accounts[uuid]
 	if !ok {
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
+	}
+
+	// If authentication will be required, show pending refs before the TouchID prompt
+	if session, _ := GetValidSession(uuid); session == nil {
+		aks.printPendingRefs()
 	}
 
 	password, err := getCredentials(uuid)
@@ -973,6 +997,8 @@ func cmdRead(uri string, accountFlag string) error {
 		return err
 	}
 	defer aks.Close()
+
+	aks.pendingRefs = []string{uri}
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {
@@ -1391,6 +1417,11 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	defer aks.Close()
 
+	// Set pending refs for display at TouchID prompt
+	for uri := range uris {
+		aks.pendingRefs = append(aks.pendingRefs, uri)
+	}
+
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
@@ -1512,6 +1543,19 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		aks, err := openKeychains(accountFlag, nil)
 		if err != nil {
 			return 0, err
+		}
+
+		// Collect all pending refs for display at TouchID prompt
+		for _, uri := range secretRefs {
+			aks.pendingRefs = append(aks.pendingRefs, uri)
+		}
+		if argsHaveRefs {
+			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
+			for _, arg := range cmdArgs {
+				for _, ref := range opRefPattern.FindAllString(arg, -1) {
+					aks.pendingRefs = append(aks.pendingRefs, ref)
+				}
+			}
 		}
 
 		for name, uri := range secretRefs {
