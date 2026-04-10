@@ -50,7 +50,7 @@ type testEnv struct {
 	keychainService string
 }
 
-func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
+func setupTestEnv(t testing.TB, fromV1 bool) *testEnv {
 	t.Helper()
 
 	// Build the test binary (cached across test runs)
@@ -122,7 +122,7 @@ func setupTestEnv(t *testing.T, fromV1 bool) *testEnv {
 	return env
 }
 
-func (e *testEnv) cleanup(t *testing.T) {
+func (e *testEnv) cleanup(t testing.TB) {
 	t.Helper()
 
 	// Delete the entire namespaced keychain entry
