@@ -453,8 +453,7 @@ func cmdSignout(accountFlag string) error {
 }
 
 // getCredentials gets the account password for an account, using session-based auth if available.
-// The biometricReason is shown in the TouchID prompt dialog.
-func getCredentials(accountUUID string, biometricReason string) (password string, err error) {
+func getCredentials(accountUUID string) (password string, err error) {
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
@@ -465,7 +464,7 @@ func getCredentials(accountUUID string, biometricReason string) (password string
 
 	if session == nil {
 		// No valid session - require biometric auth
-		if err := AuthenticateBiometric(biometricReason); err != nil {
+		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
 			return "", fmt.Errorf("authentication failed: %w", err)
 		}
 
@@ -497,7 +496,6 @@ type AccountKeychains struct {
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
-	pendingRefs    []string                    // op:// refs to display at TouchID prompt
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
@@ -548,20 +546,6 @@ func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
 	}, nil
 }
 
-// biometricReason builds a TouchID prompt reason string from the pending op:// refs.
-// Returns a default reason if no refs are pending.
-func (aks *AccountKeychains) biometricReason() string {
-	if len(aks.pendingRefs) == 0 {
-		return "access your 1Password credentials"
-	}
-	reason := "opcli: reading " + aks.pendingRefs[0]
-	if len(aks.pendingRefs) > 1 {
-		reason += fmt.Sprintf(" (and %d more)", len(aks.pendingRefs)-1)
-	}
-	aks.pendingRefs = nil
-	return reason
-}
-
 // get returns the AccountKeychain for the given identifier (shorthand, UUID, email, or URL).
 // Pass "" to get the default account. Lazily opens accounts on first access.
 func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain, error) {
@@ -584,10 +568,7 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
 	}
 
-	// Build biometric reason from pending refs before authentication
-	reason := aks.biometricReason()
-
-	password, err := getCredentials(uuid, reason)
+	password, err := getCredentials(uuid)
 	if err != nil {
 		return nil, err
 	}
@@ -992,8 +973,6 @@ func cmdRead(uri string, accountFlag string) error {
 		return err
 	}
 	defer aks.Close()
-
-	aks.pendingRefs = []string{uri}
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {
@@ -1412,11 +1391,6 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	defer aks.Close()
 
-	// Set pending refs for display at TouchID prompt
-	for uri := range uris {
-		aks.pendingRefs = append(aks.pendingRefs, uri)
-	}
-
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
@@ -1538,19 +1512,6 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		aks, err := openKeychains(accountFlag, nil)
 		if err != nil {
 			return 0, err
-		}
-
-		// Collect all pending refs for display at TouchID prompt
-		for _, uri := range secretRefs {
-			aks.pendingRefs = append(aks.pendingRefs, uri)
-		}
-		if argsHaveRefs {
-			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
-			for _, arg := range cmdArgs {
-				for _, ref := range opRefPattern.FindAllString(arg, -1) {
-					aks.pendingRefs = append(aks.pendingRefs, ref)
-				}
-			}
 		}
 
 		for name, uri := range secretRefs {

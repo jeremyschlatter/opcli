@@ -365,66 +365,6 @@ func TestE2E_AutoAccountSessionCoversAll(t *testing.T) {
 	}
 }
 
-func TestE2E_PendingRefsAtAuth(t *testing.T) {
-	env := setupTestEnv(t, false)
-	t.Cleanup(func() { env.cleanup(t) })
-
-	// Use a fresh session key so no sessions exist — forces authentication
-	freshSessionKey := "pending-refs-test"
-
-	t.Run("read shows single ref in TouchID reason", func(t *testing.T) {
-		_, stderr, code := env.runCLI("", "", map[string]string{
-			"OPCLI_TEST_SESSION_KEY": freshSessionKey + "-read",
-		}, "read", "op://Private/Test Login/password")
-		if code != 0 {
-			t.Fatalf("expected exit code 0, got %d\nstderr: %s", code, stderr)
-		}
-		if !strings.Contains(stderr, "TouchID reason: opcli: reading op://Private/Test Login/password") {
-			t.Errorf("expected ref in TouchID reason, got: %q", stderr)
-		}
-	})
-
-	t.Run("read with valid session shows no refs", func(t *testing.T) {
-		// Use the default session key which has a valid session
-		_, stderr, code := env.runCLI("", "", nil,
-			"read", "op://Private/Test Login/password")
-		if code != 0 {
-			t.Fatalf("expected exit code 0, got %d\nstderr: %s", code, stderr)
-		}
-		if strings.Contains(stderr, "TouchID reason: opcli: reading") {
-			t.Errorf("expected no TouchID prompt with valid session, got: %q", stderr)
-		}
-	})
-
-	t.Run("inject shows multiple refs in TouchID reason", func(t *testing.T) {
-		_, stderr, code := env.runCLI("", "user={{ op://Private/Test Login/username }} pass={{ op://Private/Test Login/password }}", map[string]string{
-			"OPCLI_TEST_SESSION_KEY": freshSessionKey + "-inject",
-		}, "inject")
-		if code != 0 {
-			t.Fatalf("expected exit code 0, got %d\nstderr: %s", code, stderr)
-		}
-		if !strings.Contains(stderr, "TouchID reason: opcli: reading op://Private/Test Login/") {
-			t.Errorf("expected ref in TouchID reason, got: %q", stderr)
-		}
-		if !strings.Contains(stderr, "(and 1 more)") {
-			t.Errorf("expected '(and 1 more)' in TouchID reason, got: %q", stderr)
-		}
-	})
-
-	t.Run("run shows env var refs in TouchID reason", func(t *testing.T) {
-		_, stderr, code := env.runCLI("", "", map[string]string{
-			"OPCLI_TEST_SESSION_KEY": freshSessionKey + "-run",
-			"DB_PASSWORD":           "op://Private/Test Login/password",
-		}, "run", "--no-masking", "--", "printenv", "DB_PASSWORD")
-		if code != 0 {
-			t.Fatalf("expected exit code 0, got %d\nstderr: %s", code, stderr)
-		}
-		if !strings.Contains(stderr, "TouchID reason: opcli: reading op://Private/Test Login/password") {
-			t.Errorf("expected ref in TouchID reason, got: %q", stderr)
-		}
-	})
-}
-
 func TestE2E_TouchIDFail(t *testing.T) {
 	// This test requires a fresh session (no cached auth) and TouchID to fail.
 	// Since our test setup creates a session via keychain storage, we'd need
