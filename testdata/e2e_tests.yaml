@@ -317,7 +317,7 @@ run:
     out: "<concealed by opcli>\n"
 
   - name: mask secret split across writes
-    args: [run, --, sh, -c, "echo -n secre; sleep 0.01; echo t123"]
+    args: [run, --, sh, -c, "printf secre; sleep 0.01; echo t123"]
     env:
       SECRET: "op://Private/Test Login/password"
     out: "<concealed by opcli>\n"
