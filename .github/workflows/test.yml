@@ -9,7 +9,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
       - name: Import signing certificate
         env:
@@ -37,4 +39,4 @@ jobs:
       - name: Test
         env:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
-        run: nix develop -c make test
+        run: make test
