@@ -229,11 +229,6 @@ func keychainGet(account string) (string, error) {
 		t0 = time.Now()
 	}
 	status := C.keychainGet(cService, cAccount, &outPassword, &outLen)
-	if status == -25300 { // errSecItemNotFound — retry once after brief pause
-		// macOS Keychain can transiently return "not found" under concurrent access
-		time.Sleep(50 * time.Millisecond)
-		status = C.keychainGet(cService, cAccount, &outPassword, &outLen)
-	}
 	if os.Getenv("OPCLI_TIMING") != "" {
 		fmt.Fprintf(os.Stderr, "      [keychainGet %q: %.2fms]\n", account, float64(time.Since(t0).Microseconds())/1000)
 	}
