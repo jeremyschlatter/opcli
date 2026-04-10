@@ -1,0 +1,78 @@
+name: Tip
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Test
+        env:
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+        run: nix develop -c make test
+
+      - name: Build
+        run: nix develop -c make VERSION=tip
+
+      - name: Sign binary
+        env:
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+        run: |
+          codesign --sign "$SIGN_IDENTITY" --options runtime --force opcli
+          codesign -vvv --deep --strict opcli
+
+      - name: Create release archive
+        run: |
+          ARCH=$(uname -m)
+          tar -czvf opcli-tip-darwin-${ARCH}.tar.gz opcli
+          echo "ARCHIVE=opcli-tip-darwin-${ARCH}.tar.gz" >> $GITHUB_ENV
+
+      - name: Update tip tag
+        run: |
+          git tag -f tip
+          git push -f origin tip
+
+      - name: Update tip release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tip
+          name: tip (latest main)
+          files: ${{ env.ARCHIVE }}
+          prerelease: true
+          body: |
+            Rolling build from the latest commit on `main`.
+
+            Commit: ${{ github.sha }}
