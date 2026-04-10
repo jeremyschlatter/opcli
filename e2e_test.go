@@ -432,3 +432,59 @@ func TestE2E_TouchIDFail(t *testing.T) {
 	// For now, skip this test.
 	t.Skip("TouchID failure test not yet implemented")
 }
+
+// TestE2E_KeychainConcurrent fires many concurrent CLI reads against the same
+// keychain entry to reproduce the transient errSecItemNotFound (-25300) that
+// occurs under concurrent securityd XPC access.
+func TestE2E_KeychainConcurrent(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+
+	const (
+		goroutines = 20
+		iterations = 25
+	)
+
+	var (
+		failures int64
+		total    int64
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+	)
+
+	// Barrier: all goroutines start at approximately the same time
+	ready := make(chan struct{})
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-ready
+
+			for i := 0; i < iterations; i++ {
+				_, stderr, code := env.runCLI("", "", nil, "read", "op://Private/Test Login/password")
+				mu.Lock()
+				total++
+				if code != 0 {
+					failures++
+					if failures <= 5 {
+						t.Logf("goroutine %d iter %d: exit %d: %s", id, i, code, stderr)
+					}
+				}
+				mu.Unlock()
+			}
+		}(g)
+	}
+
+	close(ready)
+	wg.Wait()
+
+	rate := float64(failures) / float64(total) * 100
+	t.Logf("Results: %d/%d failures (%.4f%%)", failures, total, rate)
+
+	if failures > 0 {
+		t.Logf("Reproduced transient keychain failure: %d failures in %d concurrent reads (%.4f%%)", failures, total, rate)
+	} else {
+		t.Logf("No failures reproduced in %d concurrent reads", total)
+	}
+}
