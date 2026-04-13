@@ -110,16 +110,46 @@ func setupTestEnv(t testing.TB, fromV1 bool) *testEnv {
 		}
 	}
 
-	// Verify credentials are readable (keychain can be flaky)
-	verifyCmd := exec.Command(binPath, "read", "op://Private/Test Login/password")
-	verifyCmd.Env = env.baseEnv()
-	var verifyErr bytes.Buffer
-	verifyCmd.Stderr = &verifyErr
-	if err := verifyCmd.Run(); err != nil {
-		t.Fatalf("credentials stored but not readable: %v\nstderr: %s", err, verifyErr.String())
+	// Verify credentials are readable AND pre-cache each account's symmetric key.
+	//
+	// Parallel subtests share this env's single keychain credential entry. If any
+	// subtest is the first to touch a given account, the CLI derives that account's
+	// symkey and writes it back via SetCachedSymKey — that write races with other
+	// subtests' concurrent reads of the same keychain entry and can surface as
+	// transient OSStatus errors (observed: -67701, -25299 under load). Pre-caching
+	// every account here, sequentially, makes all parallel subtest invocations
+	// read-only against the shared keychain entry, eliminating the race.
+	for _, acct := range testDB.Accounts {
+		ref, err := firstReadableRef(acct)
+		if err != nil {
+			t.Fatalf("no readable ref for account %s: %v", acct.Shorthand, err)
+		}
+		verifyCmd := exec.Command(binPath, "read", ref)
+		verifyCmd.Env = env.baseEnv()
+		var verifyErr bytes.Buffer
+		verifyCmd.Stderr = &verifyErr
+		if err := verifyCmd.Run(); err != nil {
+			t.Fatalf("credentials stored but not readable for %s: %v\nstderr: %s",
+				acct.Shorthand, err, verifyErr.String())
+		}
 	}
 
 	return env
+}
+
+// firstReadableRef returns an op:// reference pointing at some field of some
+// item in some vault of the given account. Used by setupTestEnv to exercise
+// decryption for every account (to warm the symkey cache).
+func firstReadableRef(acct *TestAccount) (string, error) {
+	for _, v := range acct.Vaults {
+		for _, item := range v.Items {
+			for fieldName := range item.Fields {
+				return fmt.Sprintf("op://%s:%s/%s/%s",
+					acct.Shorthand, v.Name, item.Title, fieldName), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("account %s has no vault/item/field", acct.Shorthand)
 }
 
 func (e *testEnv) cleanup(t testing.TB) {
