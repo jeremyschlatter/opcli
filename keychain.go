@@ -67,7 +67,7 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 #pragma clang diagnostic pop
 
 // Defined in touchid.m, linked via libtouchid.a
-extern int authenticateTouchID(const char *reason);
+extern int authenticateTouchID(const char *reason, const char *refsText);
 
 // Add or update a keychain item with app-only access
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
@@ -445,14 +445,44 @@ func SetDefaultAccount(accountUUID string) error {
 }
 
 // AuthenticateBiometric prompts for Touch ID or password using LAContext.
-func AuthenticateBiometric(reason string) error {
+// When refs is non-empty, a context window is shown alongside the system
+// TouchID dialog listing the op:// references being authenticated for.
+func AuthenticateBiometric(reason string, refs []string) error {
 	cReason := C.CString(reason)
 	defer C.free(unsafe.Pointer(cReason))
 
-	if C.authenticateTouchID(cReason) != 0 {
+	refsText := formatBiometricRefs(refs)
+	cRefs := C.CString(refsText)
+	defer C.free(unsafe.Pointer(cRefs))
+
+	if C.authenticateTouchID(cReason, cRefs) != 0 {
 		return fmt.Errorf("authentication failed or cancelled")
 	}
 	return nil
+}
+
+// formatBiometricRefs builds the multi-line string shown in the context window.
+// Returns "" when refs is empty (suppresses the window entirely).
+func formatBiometricRefs(refs []string) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	// Dedup while preserving order.
+	seen := make(map[string]bool, len(refs))
+	unique := refs[:0:0]
+	for _, r := range refs {
+		if !seen[r] {
+			seen[r] = true
+			unique = append(unique, r)
+		}
+	}
+	var b strings.Builder
+	for _, r := range unique {
+		b.WriteString("  • ")
+		b.WriteString(r)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // HasStoredCredentials checks if credentials exist for the account.

@@ -18,7 +18,7 @@ all: opcli
 
 # Compile Objective-C Touch ID wrapper to static library
 libtouchid.a: touchid.m
-	clang -c -o touchid.o touchid.m -fobjc-arc -fmodules
+	clang -c -o touchid.o touchid.m -fobjc-arc -fmodules -Wno-deprecated-declarations
 	ar rcs libtouchid.a touchid.o
 	rm -f touchid.o
 

@@ -453,7 +453,9 @@ func cmdSignout(accountFlag string) error {
 }
 
 // getCredentials gets the account password for an account, using session-based auth if available.
-func getCredentials(accountUUID string) (password string, err error) {
+// pendingRefs lists the op:// references driving this authentication; they are
+// displayed in a context window shown alongside the TouchID prompt.
+func getCredentials(accountUUID string, pendingRefs []string) (password string, err error) {
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
@@ -464,7 +466,7 @@ func getCredentials(accountUUID string) (password string, err error) {
 
 	if session == nil {
 		// No valid session - require biometric auth
-		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
+		if err := AuthenticateBiometric("access your 1Password credentials", pendingRefs); err != nil {
 			return "", fmt.Errorf("authentication failed: %w", err)
 		}
 
@@ -496,6 +498,7 @@ type AccountKeychains struct {
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
+	pendingRefs    []string // op:// refs to show in the TouchID context window
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
@@ -568,7 +571,16 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
 	}
 
-	password, err := getCredentials(uuid)
+	// Pass pending refs only when auth will actually be prompted (no valid
+	// session). Once consumed, clear them so a second account lookup in the
+	// same command doesn't reuse a stale list.
+	var refsForAuth []string
+	if session, _ := GetValidSession(uuid); session == nil {
+		refsForAuth = aks.pendingRefs
+		aks.pendingRefs = nil
+	}
+
+	password, err := getCredentials(uuid, refsForAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -973,6 +985,8 @@ func cmdRead(uri string, accountFlag string) error {
 		return err
 	}
 	defer aks.Close()
+
+	aks.pendingRefs = []string{uri}
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {
@@ -1391,6 +1405,10 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	defer aks.Close()
 
+	for uri := range uris {
+		aks.pendingRefs = append(aks.pendingRefs, uri)
+	}
+
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
@@ -1512,6 +1530,16 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		aks, err := openKeychains(accountFlag, nil)
 		if err != nil {
 			return 0, err
+		}
+
+		for _, uri := range secretRefs {
+			aks.pendingRefs = append(aks.pendingRefs, uri)
+		}
+		if argsHaveRefs {
+			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
+			for _, arg := range cmdArgs {
+				aks.pendingRefs = append(aks.pendingRefs, opRefPattern.FindAllString(arg, -1)...)
+			}
 		}
 
 		for name, uri := range secretRefs {
