@@ -69,36 +69,80 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 // Defined in touchid.m, linked via libtouchid.a
 extern int authenticateTouchID(const char *reason);
 
-// Add or update a keychain item with app-only access
+// Add or update a keychain item with app-only access.
+//
+// Uses SecItemUpdate for existing items (atomic at the securityd level — concurrent
+// readers see either old or new data, never "not found"). Falls back to SecItemAdd
+// with an app-only ACL when the item does not yet exist (first run).
+//
+// Previously this did SecItemDelete + SecItemAdd, which created a brief window
+// where concurrent SecItemCopyMatching calls observed errSecItemNotFound (-25300).
+// See op-xev for the investigation.
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
     CFStringRef serviceRef = createCFString(service);
     CFStringRef accountRef = createCFString(account);
     CFDataRef passwordRef = CFDataCreate(NULL, (const UInt8 *)password, passwordLen);
 
-    // Delete existing item first to reset ACL
-    CFMutableDictionaryRef deleteQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(deleteQuery, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(deleteQuery, kSecAttrService, serviceRef);
-    CFDictionarySetValue(deleteQuery, kSecAttrAccount, accountRef);
-    SecItemDelete(deleteQuery);
-    CFRelease(deleteQuery);
+    // Try atomic update first.
+    CFMutableDictionaryRef updateQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(updateQuery, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(updateQuery, kSecAttrService, serviceRef);
+    CFDictionarySetValue(updateQuery, kSecAttrAccount, accountRef);
 
-    // Create app-only access
-    SecAccessRef access = createAppOnlyAccess("opcli credentials");
+    CFMutableDictionaryRef updateAttrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(updateAttrs, kSecValueData, passwordRef);
 
-    // Add new item
-    CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(query, kSecAttrService, serviceRef);
-    CFDictionarySetValue(query, kSecAttrAccount, accountRef);
-    CFDictionarySetValue(query, kSecValueData, passwordRef);
-    if (access != NULL) {
-        CFDictionarySetValue(query, kSecAttrAccess, access);
+    OSStatus status = SecItemUpdate(updateQuery, updateAttrs);
+
+    CFRelease(updateQuery);
+    CFRelease(updateAttrs);
+
+    if (status == errSecSuccess) {
+        CFRelease(serviceRef);
+        CFRelease(accountRef);
+        CFRelease(passwordRef);
+        return status;
     }
 
-    OSStatus status = SecItemAdd(query, NULL);
+    if (status != errSecItemNotFound) {
+        CFRelease(serviceRef);
+        CFRelease(accountRef);
+        CFRelease(passwordRef);
+        return status;
+    }
 
-    CFRelease(query);
+    // Item doesn't exist yet — create it with the app-only ACL.
+    SecAccessRef access = createAppOnlyAccess("opcli credentials");
+
+    CFMutableDictionaryRef addQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(addQuery, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(addQuery, kSecAttrService, serviceRef);
+    CFDictionarySetValue(addQuery, kSecAttrAccount, accountRef);
+    CFDictionarySetValue(addQuery, kSecValueData, passwordRef);
+    if (access != NULL) {
+        CFDictionarySetValue(addQuery, kSecAttrAccess, access);
+    }
+
+    status = SecItemAdd(addQuery, NULL);
+
+    // Another writer may have created the item between our Update and Add —
+    // retry Update in that case so we don't spuriously fail.
+    if (status == errSecDuplicateItem) {
+        CFMutableDictionaryRef retryQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(retryQuery, kSecClass, kSecClassGenericPassword);
+        CFDictionarySetValue(retryQuery, kSecAttrService, serviceRef);
+        CFDictionarySetValue(retryQuery, kSecAttrAccount, accountRef);
+
+        CFMutableDictionaryRef retryAttrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(retryAttrs, kSecValueData, passwordRef);
+
+        status = SecItemUpdate(retryQuery, retryAttrs);
+
+        CFRelease(retryQuery);
+        CFRelease(retryAttrs);
+    }
+
+    CFRelease(addQuery);
     if (access) CFRelease(access);
     CFRelease(serviceRef);
     CFRelease(accountRef);
@@ -229,11 +273,6 @@ func keychainGet(account string) (string, error) {
 		t0 = time.Now()
 	}
 	status := C.keychainGet(cService, cAccount, &outPassword, &outLen)
-	if status == -25300 { // errSecItemNotFound — retry once after brief pause
-		// macOS Keychain can transiently return "not found" under concurrent access
-		time.Sleep(50 * time.Millisecond)
-		status = C.keychainGet(cService, cAccount, &outPassword, &outLen)
-	}
 	if os.Getenv("OPCLI_TIMING") != "" {
 		fmt.Fprintf(os.Stderr, "      [keychainGet %q: %.2fms]\n", account, float64(time.Since(t0).Microseconds())/1000)
 	}
