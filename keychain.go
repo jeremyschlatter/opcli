@@ -461,28 +461,63 @@ func AuthenticateBiometric(reason string, refs []string) error {
 	return nil
 }
 
-// formatBiometricRefs builds the multi-line string shown in the context window.
-// Returns "" when refs is empty (suppresses the window entirely).
+// formatBiometricRefs groups refs by vault ("[account:]vault") and emits a
+// JSON payload that the ObjC side (touchid.m) consumes to render a
+// vault-grouped list in the authorization window. Returns "" when refs is
+// empty (suppresses the window entirely).
+//
+// Input refs look like "op://[account:]vault/item/[section/]field". We split
+// on the first '/' after "op://" to separate "[account:]vault" (the group
+// key) from the rest (the display string within the group). Refs that don't
+// start with "op://" fall into a single empty-key group — shouldn't happen
+// but we're defensive.
+//
+// JSON shape: [{"vault":"Employee","refs":["Item A/field"]}, ...]
 func formatBiometricRefs(refs []string) string {
 	if len(refs) == 0 {
 		return ""
 	}
-	// Dedup while preserving order.
+	type group struct {
+		Vault string   `json:"vault"`
+		Refs  []string `json:"refs"`
+	}
+	var order []string
+	byVault := make(map[string]*group)
 	seen := make(map[string]bool, len(refs))
-	unique := refs[:0:0]
 	for _, r := range refs {
-		if !seen[r] {
-			seen[r] = true
-			unique = append(unique, r)
+		if seen[r] {
+			continue
 		}
+		seen[r] = true
+		vault, display := splitVaultAndDisplay(r)
+		g, ok := byVault[vault]
+		if !ok {
+			g = &group{Vault: vault}
+			byVault[vault] = g
+			order = append(order, vault)
+		}
+		g.Refs = append(g.Refs, display)
 	}
-	var b strings.Builder
-	for _, r := range unique {
-		b.WriteString("  • ")
-		b.WriteString(r)
-		b.WriteString("\n")
+	out := make([]*group, 0, len(order))
+	for _, v := range order {
+		out = append(out, byVault[v])
 	}
-	return b.String()
+	data, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// splitVaultAndDisplay separates an op:// ref into its "[account:]vault"
+// group key and the remainder used as the in-group display string.
+func splitVaultAndDisplay(ref string) (vault, display string) {
+	path := strings.TrimPrefix(ref, "op://")
+	slash := strings.Index(path, "/")
+	if slash < 0 {
+		return path, ""
+	}
+	return path[:slash], path[slash+1:]
 }
 
 // HasStoredCredentials checks if credentials exist for the account.

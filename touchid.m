@@ -1,61 +1,164 @@
 //go:build !test
 
-// TouchID authentication with an inline context window, matching the unified
-// single-window UX of the 1Password desktop app.
+// TouchID authentication with an inline context window.
 //
-// We create a custom NSWindow listing the pending op:// refs and embed an
-// LAAuthenticationView inside it. The LAAuthenticationView is an NSView
-// bundled with the LocalAuthenticationEmbeddedUI framework (macOS 12+) that
-// presents biometric UI inline instead of spawning the system SecurityAgent
-// dialog. This is what yields the single-card look — no floating LAContext
-// modal floats behind/beside our window because there is no system dialog at
-// all; the TouchID icon and scan UI are children of our window.
+// We render a single NSWindow containing:
+//   - title ("opcli access requested") + subtitle ("request to read N secrets")
+//   - a scrollable list of op:// refs grouped by "[account:]vault" header
+//     (each vault's refs in an inner scroll view capped at ~8 visible rows so
+//     very long lists don't push the auth button off-screen)
+//   - an LAAuthenticationView (macOS 12+, biometric UI rendered inline —
+//     no separate SecurityAgent modal) with an "Authorize with Touch ID"
+//     label
+//   - a Cancel button
 //
-// Limitations of LAAuthenticationView:
-//   - biometric-only (Touch ID / Watch / companion). If the user has no such
-//     hardware, the evaluation fails and we bail to the classic LAContext
-//     dispatch-semaphore path (which shows the old system dialog without our
-//     window).
-//   - the view itself only renders a compact icon; the textual reason has to
-//     come from the surrounding window — which is exactly what we want,
-//     because that's where the refs list lives.
+// Grouped ref payload is passed from Go as JSON, shape:
+//   [{"vault":"Employee","refs":["item/field", ...]}, ...]
 //
-// History of this file:
-//   - op-rba (reverted): printed refs to stdout. Polluted pipes.
-//   - op-c0e first try (reverted): crammed refs into LAContext reason string.
-//     Too cramped, broke CI.
-//   - op-c0e second try (PR #7 rev 1): used LAContext standard dialog with a
-//     floating NSPanel next to it. Reviewer rejected the two-window look.
-//   - this file: LAAuthenticationView embedded in our window. One window.
+// Fallback: if biometrics aren't available (no Touch ID hardware or accessory
+// not paired), the inline-window path is skipped entirely and we use the
+// classic LAContext.evaluatePolicy dispatch-semaphore flow — no custom
+// window, unstyled, but functional.
 
 #import <AppKit/AppKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <LocalAuthenticationEmbeddedUI/LocalAuthenticationEmbeddedUI.h>
 #import <dispatch/dispatch.h>
 
-@interface OpcliAuthDelegate : NSObject <NSApplicationDelegate>
-@property(nonatomic, copy) NSString *reason;
-@property(nonatomic, copy) NSString *refsText;
-@property(nonatomic, assign) BOOL success;
+// Flipped NSView: y grows downward. Simplifies top-down layout math inside
+// the grouped refs scroll view (default Cocoa is bottom-up).
+@interface OpcliFlippedView : NSView
+@end
+@implementation OpcliFlippedView
+- (BOOL)isFlipped { return YES; }
 @end
 
-static NSWindow *createAuthWindow(NSString *refsText, LAAuthenticationView *authView) {
+@interface OpcliAuthDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, copy)   NSString  *reason;
+@property(nonatomic, copy)   NSString  *refsJSON;
+@property(nonatomic, strong) LAContext *context;
+@property(nonatomic, strong) NSWindow  *window;
+@property(nonatomic, assign) BOOL       success;
+- (void)cancelClicked:(id)sender;
+@end
+
+// Build the grouped refs list as a single flipped NSView suitable for
+// hosting inside an NSScrollView. Each vault becomes a header + an inner
+// scroll view containing its refs (capped to ~8 visible rows so very long
+// lists don't push the auth button off-screen). The host is flipped so y
+// grows downward — simpler top-down layout math.
+static NSView *buildGroupedRefsList(NSArray *groups, CGFloat width) {
+    CGFloat rowH = 17;   // matches monospace 11pt line height with a little breathing room
+    CGFloat innerPad = 6;
+    CGFloat innerMaxRows = 8;
+    CGFloat headerH = 20;
+    CGFloat groupSpacing = 14;
+    CGFloat sideInset = 4;
+    CGFloat headerToRefsGap = 4;
+
+    NSFont *refFont = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    NSFont *headerFont = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+
+    CGFloat contentWidth = width - sideInset * 2;
+
+    // First pass: compute per-section and total heights.
+    NSMutableArray *plans = [NSMutableArray array];
+    CGFloat totalHeight = 0;
+    for (NSDictionary *g in groups) {
+        NSArray<NSString *> *refs = g[@"refs"] ?: @[];
+        CGFloat innerContent = MAX(rowH, refs.count * rowH) + innerPad * 2;
+        CGFloat innerH = MIN(innerContent, innerMaxRows * rowH + innerPad * 2);
+        CGFloat sectionH = headerH + headerToRefsGap + innerH;
+        [plans addObject:@{@"vault": g[@"vault"] ?: @"",
+                           @"refs":  refs,
+                           @"innerH": @(innerH),
+                           @"sectionH": @(sectionH)}];
+        totalHeight += sectionH + groupSpacing;
+    }
+    if (totalHeight > 0) totalHeight -= groupSpacing;
+
+    OpcliFlippedView *host = [[OpcliFlippedView alloc] initWithFrame:
+        NSMakeRect(0, 0, width, totalHeight)];
+
+    // Second pass: lay out top-down (flipped coords).
+    CGFloat y = 0;
+    for (NSDictionary *plan in plans) {
+        NSTextField *header = [NSTextField labelWithString:
+            [NSString stringWithFormat:@"# %@", plan[@"vault"]]];
+        [header setFont:headerFont];
+        [header setTextColor:[NSColor labelColor]];
+        [header setFrame:NSMakeRect(sideInset, y, contentWidth, headerH)];
+        [host addSubview:header];
+        y += headerH + headerToRefsGap;
+
+        CGFloat innerH = [plan[@"innerH"] doubleValue];
+        NSScrollView *innerScroll = [[NSScrollView alloc] initWithFrame:
+            NSMakeRect(sideInset, y, contentWidth, innerH)];
+        [innerScroll setHasVerticalScroller:YES];
+        // Keep the scroller visible even when not scrolling, so the user can
+        // see there are more refs than fit. Legacy style always draws the
+        // track — overlay style fades out.
+        [innerScroll setAutohidesScrollers:NO];
+        [innerScroll setScrollerStyle:NSScrollerStyleLegacy];
+        [innerScroll setBorderType:NSNoBorder];
+        [innerScroll setDrawsBackground:NO];
+        [innerScroll setTranslatesAutoresizingMaskIntoConstraints:YES];
+
+        NSSize innerContentSize = [innerScroll contentSize];
+        NSArray *refs = plan[@"refs"];
+        NSMutableAttributedString *refsAttr = [[NSMutableAttributedString alloc] init];
+        for (NSUInteger i = 0; i < refs.count; i++) {
+            if (i > 0) {
+                [refsAttr appendAttributedString:[[NSAttributedString alloc]
+                    initWithString:@"\n"]];
+            }
+            [refsAttr appendAttributedString:[[NSAttributedString alloc]
+                initWithString:refs[i]
+                attributes:@{NSFontAttributeName: refFont,
+                             NSForegroundColorAttributeName: [NSColor labelColor]}]];
+        }
+        CGFloat docH = MAX(innerContentSize.height, refs.count * rowH + innerPad * 2);
+        NSTextView *tv = [[NSTextView alloc] initWithFrame:
+            NSMakeRect(0, 0, innerContentSize.width, docH)];
+        [tv setEditable:NO];
+        [tv setSelectable:YES];
+        [tv setDrawsBackground:NO];
+        [tv setTextContainerInset:NSMakeSize(innerPad, innerPad)];
+        [tv setMinSize:NSMakeSize(0, 0)];
+        [tv setMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
+        [tv setVerticallyResizable:YES];
+        [tv setHorizontallyResizable:NO];
+        [[tv textContainer] setWidthTracksTextView:YES];
+        [[tv textStorage] setAttributedString:refsAttr];
+        [innerScroll setDocumentView:tv];
+        [host addSubview:innerScroll];
+        y += innerH + groupSpacing;
+    }
+
+    return host;
+}
+
+// Construct the authorization window and install authView as the biometric
+// indicator. authView is typically an LAAuthenticationView already paired
+// with the LAContext that will be evaluated.
+static NSWindow *buildAuthWindow(NSString *refsJSON, NSView *authView,
+                                 NSInteger secretCount, id cancelTarget) {
+    NSData *data = [refsJSON dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *groups = [NSJSONSerialization JSONObjectWithData:data
+                                                      options:0
+                                                        error:nil];
+    if (![groups isKindOfClass:[NSArray class]]) groups = @[];
+
     NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
     NSRect screenFrame = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1440, 900);
 
-    CGFloat w = 440;
-    CGFloat headerH = 32;
-    CGFloat refsH = 150;
-    CGFloat padding = 16;
-    CGFloat authViewHeight = [authView frame].size.height;
-    CGFloat h = headerH + refsH + authViewHeight + padding * 4;
+    CGFloat w = 460;
+    CGFloat h = 480;
+    NSRect frame = NSMakeRect(NSMidX(screenFrame) - w / 2,
+                              NSMidY(screenFrame) - h / 2,
+                              w, h);
 
-    CGFloat x = NSMidX(screenFrame) - w / 2;
-    CGFloat y = NSMidY(screenFrame) - h / 2;
-    NSRect frame = NSMakeRect(x, y, w, h);
-
-    NSWindow *win = [[NSWindow alloc]
-        initWithContentRect:frame
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskFullSizeContentView)
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -65,6 +168,9 @@ static NSWindow *createAuthWindow(NSString *refsText, LAAuthenticationView *auth
     [win setMovableByWindowBackground:YES];
     [win setLevel:NSFloatingWindowLevel];
     [win setReleasedWhenClosed:NO];
+    // Force dark appearance so the dialog looks consistent regardless of
+    // system Light/Dark mode — matches 1Password's own auth dialog chrome.
+    [win setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
 
     NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
     [bg setMaterial:NSVisualEffectMaterialHUDWindow];
@@ -74,106 +180,167 @@ static NSWindow *createAuthWindow(NSString *refsText, LAAuthenticationView *auth
     [[bg layer] setCornerRadius:12];
     [win setContentView:bg];
 
+    CGFloat padding = 20;
+
+    // --- Top: title + subtitle ---
     CGFloat cursorY = h - padding;
+    CGFloat titleH = 24;
+    cursorY -= titleH;
+    NSTextField *title = [NSTextField labelWithString:@"opcli access requested"];
+    [title setFont:[NSFont systemFontOfSize:17 weight:NSFontWeightSemibold]];
+    [title setTextColor:[NSColor labelColor]];
+    [title setAlignment:NSTextAlignmentCenter];
+    [title setFrame:NSMakeRect(padding, cursorY, w - padding * 2, titleH)];
+    [bg addSubview:title];
 
-    NSTextField *header = [NSTextField labelWithString:@"Touch ID required to read secrets"];
-    [header setFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]];
-    [header setTextColor:[NSColor labelColor]];
-    [header setAlignment:NSTextAlignmentCenter];
-    cursorY -= headerH;
-    [header setFrame:NSMakeRect(padding, cursorY, w - padding * 2, headerH)];
-    [bg addSubview:header];
+    CGFloat subtitleH = 18;
+    cursorY -= subtitleH + 2;
+    NSString *subtitleText = [NSString stringWithFormat:@"request to read %ld %@",
+                              (long)secretCount,
+                              secretCount == 1 ? @"secret" : @"secrets"];
+    NSTextField *subtitle = [NSTextField labelWithString:subtitleText];
+    [subtitle setFont:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]];
+    [subtitle setTextColor:[NSColor secondaryLabelColor]];
+    [subtitle setAlignment:NSTextAlignmentCenter];
+    [subtitle setFrame:NSMakeRect(padding, cursorY, w - padding * 2, subtitleH)];
+    [bg addSubview:subtitle];
 
-    cursorY -= padding;
+    // --- Bottom: cancel button + auth label + auth view ---
+    CGFloat bottomY = padding;
 
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(padding, cursorY - refsH, w - padding * 2, refsH)];
-    [scroll setHasVerticalScroller:YES];
-    [scroll setAutohidesScrollers:YES];
-    [scroll setBorderType:NSNoBorder];
-    [scroll setDrawsBackground:NO];
+    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel"
+                                          target:cancelTarget
+                                          action:@selector(cancelClicked:)];
+    [cancel setBezelStyle:NSBezelStyleRounded];
+    [cancel setKeyEquivalent:@"\033"]; // Esc
+    [cancel setFrame:NSMakeRect(padding, bottomY, 100, 28)];
+    [bg addSubview:cancel];
 
-    NSSize contentSize = [scroll contentSize];
-    NSTextView *textView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
-    [textView setEditable:NO];
-    [textView setSelectable:YES];
-    [textView setDrawsBackground:NO];
-    [textView setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
-    [textView setTextColor:[NSColor labelColor]];
-    [textView setTextContainerInset:NSMakeSize(4, 4)];
-    [textView setMinSize:NSMakeSize(0, contentSize.height)];
-    [textView setMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
-    [textView setVerticallyResizable:YES];
-    [textView setHorizontallyResizable:NO];
-    [[textView textContainer] setWidthTracksTextView:YES];
-    [textView setString:refsText];
-    [scroll setDocumentView:textView];
-    [bg addSubview:scroll];
+    NSSize avSize = [authView fittingSize];
+    if (avSize.width == 0 || avSize.height == 0) avSize = [authView frame].size;
+    if (avSize.width == 0 || avSize.height == 0) avSize = NSMakeSize(32, 32);
 
-    cursorY -= refsH + padding;
+    CGFloat authLabelH = 18;
+    CGFloat authBlockTopPad = 14;
+    CGFloat authLabelY = bottomY + 28 + authBlockTopPad;
+    NSMutableAttributedString *authText = [[NSMutableAttributedString alloc]
+        initWithString:@"Authorize with "
+            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12],
+                         NSForegroundColorAttributeName: [NSColor labelColor]}];
+    [authText appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"Touch ID"
+            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12
+                                                                 weight:NSFontWeightSemibold],
+                         NSForegroundColorAttributeName: [NSColor labelColor]}]];
+    NSTextField *authLabel = [NSTextField labelWithAttributedString:authText];
+    [authLabel setAlignment:NSTextAlignmentCenter];
+    [authLabel setFrame:NSMakeRect(padding, authLabelY, w - padding * 2, authLabelH)];
+    [bg addSubview:authLabel];
 
-    NSRect avFrame = [authView frame];
-    CGFloat avX = (w - avFrame.size.width) / 2;
-    [authView setFrame:NSMakeRect(avX, cursorY - avFrame.size.height, avFrame.size.width, avFrame.size.height)];
+    CGFloat authViewY = authLabelY + authLabelH + 6;
+    CGFloat avX = (w - avSize.width) / 2;
+    [authView setFrame:NSMakeRect(avX, authViewY, avSize.width, avSize.height)];
     [bg addSubview:authView];
+
+    // --- Middle: refs list in an outer scroll view ---
+    CGFloat refsTop = cursorY - 10;
+    CGFloat refsBottom = authViewY + avSize.height + 18;
+    CGFloat refsH = refsTop - refsBottom;
+
+    NSScrollView *outerScroll = [[NSScrollView alloc] initWithFrame:
+        NSMakeRect(padding, refsBottom, w - padding * 2, refsH)];
+    [outerScroll setHasVerticalScroller:YES];
+    [outerScroll setAutohidesScrollers:YES];
+    [outerScroll setBorderType:NSNoBorder];
+    [outerScroll setDrawsBackground:NO];
+
+    NSView *groupedList = buildGroupedRefsList(groups, [outerScroll contentSize].width);
+    [outerScroll setDocumentView:groupedList];
+
+    [bg addSubview:outerScroll];
 
     return win;
 }
 
 @implementation OpcliAuthDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    LAContext *context = [[LAContext alloc] init];
+    self.context = [[LAContext alloc] init];
 
-    // LAAuthenticationView only supports biometric-ish policies. If no
-    // biometrics are available, fall back to the classic alert flow — it
-    // won't look unified, but it's still functional.
     NSError *canErr = nil;
-    BOOL canBiometric = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-                                             error:&canErr];
+    BOOL canBiometric = [self.context
+        canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                    error:&canErr];
     if (!canBiometric) {
-        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
-                localizedReason:self.reason
-                          reply:^(BOOL result, NSError *authError) {
+        // Fallback: no biometrics → classic alert flow, no custom window.
+        [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+                     localizedReason:self.reason
+                               reply:^(BOOL result, NSError *authError) {
             self.success = result;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [NSApp stop:nil];
-                NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
-                                                   location:NSZeroPoint
-                                              modifierFlags:0 timestamp:0
-                                               windowNumber:0 context:nil
-                                                    subtype:0 data1:0 data2:0];
-                [NSApp postEvent:wake atStart:YES];
-            });
+            dispatch_async(dispatch_get_main_queue(), ^{ [self stopApp]; });
         }];
         return;
     }
 
-    LAAuthenticationView *authView = [[LAAuthenticationView alloc] initWithContext:context];
-    NSWindow *authWindow = createAuthWindow(self.refsText, authView);
-    [authWindow makeKeyAndOrderFront:nil];
+    // Count secrets across all vault groups for the subtitle.
+    NSInteger secretCount = 0;
+    NSData *data = [self.refsJSON dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *groups = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([groups isKindOfClass:[NSArray class]]) {
+        for (NSDictionary *g in groups) {
+            NSArray *refs = g[@"refs"];
+            if ([refs isKindOfClass:[NSArray class]]) secretCount += refs.count;
+        }
+    }
+
+    // .small (32x32) fingerprint — .regular (64x64) was reported as too
+    // large against our window size.
+    LAAuthenticationView *authView = [[LAAuthenticationView alloc]
+        initWithContext:self.context controlSize:NSControlSizeSmall];
+
+    self.window = buildAuthWindow(self.refsJSON, authView, secretCount, self);
+    [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-            localizedReason:self.reason
-                      reply:^(BOOL result, NSError *authError) {
+    [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                 localizedReason:self.reason
+                           reply:^(BOOL result, NSError *authError) {
         self.success = result;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [authWindow orderOut:nil];
-            [authWindow close];
-            [NSApp stop:nil];
-            NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
-                                               location:NSZeroPoint
-                                          modifierFlags:0 timestamp:0
-                                           windowNumber:0 context:nil
-                                                subtype:0 data1:0 data2:0];
-            [NSApp postEvent:wake atStart:YES];
-        });
+        dispatch_async(dispatch_get_main_queue(), ^{ [self stopApp]; });
     }];
+}
+
+- (void)cancelClicked:(id)sender {
+    // Invalidate the context so the pending evaluatePolicy reply fires with
+    // a cancelation error; its callback will then call stopApp as normal.
+    [self.context invalidate];
+}
+
+- (void)stopApp {
+    if (self.window) {
+        [self.window orderOut:nil];
+        [self.window close];
+        self.window = nil;
+    }
+    [NSApp stop:nil];
+    // NSApp stop: only takes effect at the next event — post one so the
+    // run loop wakes and actually returns.
+    NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                       location:NSZeroPoint
+                                  modifierFlags:0
+                                      timestamp:0
+                                   windowNumber:0
+                                        context:nil
+                                        subtype:0
+                                          data1:0
+                                          data2:0];
+    [NSApp postEvent:wake atStart:YES];
 }
 @end
 
 // C interface for Go.
-// If refsText is non-NULL and non-empty, an inline authentication window is
-// shown listing the refs. Otherwise, only the standard system prompt appears.
+// If refsText is non-NULL and non-empty, an inline authorization window is
+// shown listing the grouped refs. Otherwise, only the standard system
+// prompt appears (no window).
 int authenticateTouchID(const char *reason, const char *refsText) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
@@ -203,7 +370,7 @@ int authenticateTouchID(const char *reason, const char *refsText) {
 
         OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
         delegate.reason = reasonStr;
-        delegate.refsText = [NSString stringWithUTF8String:refsText];
+        delegate.refsJSON = [NSString stringWithUTF8String:refsText];
         [NSApp setDelegate:delegate];
         [NSApp run];
         return delegate.success ? 0 : 1;
