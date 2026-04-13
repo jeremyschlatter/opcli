@@ -20,18 +20,6 @@ func useIsolatedKeychainService(t *testing.T) {
 	t.Cleanup(func() { keychainService = orig })
 }
 
-// tryKeychainAccess checks if the keychain is accessible from this process.
-// Returns false if the binary is unsigned or keychain access is restricted.
-func tryKeychainAccess() bool {
-	testKey := "opcli-access-probe"
-	err := keychainSet(testKey, "probe")
-	if err != nil {
-		return false
-	}
-	keychainDelete(testKey)
-	return true
-}
-
 // stressIters returns the stress-test multiplier. Defaults to 1 (bounded,
 // runs in default `make test`). Set OPCLI_STRESS=N (e.g. 1000) to run the
 // heavier variants used to chase rare races locally.
@@ -51,9 +39,6 @@ func stressIters() int {
 // on an existing item all succeed. Pure reads should never fail.
 func TestKeychainConcurrentRead(t *testing.T) {
 	useIsolatedKeychainService(t)
-	if !tryKeychainAccess() {
-		t.Skip("keychain not accessible (binary may be unsigned)")
-	}
 
 	testAccount := "opcli-concurrent-read-test"
 	testValue := "test-value-for-concurrent-reads"
@@ -100,9 +85,6 @@ func TestKeychainConcurrentRead(t *testing.T) {
 // Bounded for default `make test`: set OPCLI_STRESS=N to amplify iterations.
 func TestKeychainConcurrentReadWrite(t *testing.T) {
 	useIsolatedKeychainService(t)
-	if !tryKeychainAccess() {
-		t.Skip("keychain not accessible (binary may be unsigned)")
-	}
 
 	testAccount := "opcli-concurrent-rw-test"
 	if err := keychainSet(testAccount, "initial-value"); err != nil {
@@ -161,9 +143,6 @@ func TestKeychainConcurrentReadWrite(t *testing.T) {
 // Both paths must produce a readable item with the expected value.
 func TestKeychainSetAddThenUpdate(t *testing.T) {
 	useIsolatedKeychainService(t)
-	if !tryKeychainAccess() {
-		t.Skip("keychain not accessible (binary may be unsigned)")
-	}
 
 	testAccount := "opcli-add-then-update-test"
 	// Ensure clean state.
