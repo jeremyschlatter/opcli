@@ -1,46 +1,105 @@
 //go:build !test
 
+// TouchID authentication with an inline context window, matching the unified
+// single-window UX of the 1Password desktop app.
+//
+// We create a custom NSWindow listing the pending op:// refs and embed an
+// LAAuthenticationView inside it. The LAAuthenticationView is an NSView
+// bundled with the LocalAuthenticationEmbeddedUI framework (macOS 12+) that
+// presents biometric UI inline instead of spawning the system SecurityAgent
+// dialog. This is what yields the single-card look — no floating LAContext
+// modal floats behind/beside our window because there is no system dialog at
+// all; the TouchID icon and scan UI are children of our window.
+//
+// Limitations of LAAuthenticationView:
+//   - biometric-only (Touch ID / Watch / companion). If the user has no such
+//     hardware, the evaluation fails and we bail to the classic LAContext
+//     dispatch-semaphore path (which shows the old system dialog without our
+//     window).
+//   - the view itself only renders a compact icon; the textual reason has to
+//     come from the surrounding window — which is exactly what we want,
+//     because that's where the refs list lives.
+//
+// History of this file:
+//   - op-rba (reverted): printed refs to stdout. Polluted pipes.
+//   - op-c0e first try (reverted): crammed refs into LAContext reason string.
+//     Too cramped, broke CI.
+//   - op-c0e second try (PR #7 rev 1): used LAContext standard dialog with a
+//     floating NSPanel next to it. Reviewer rejected the two-window look.
+//   - this file: LAAuthenticationView embedded in our window. One window.
+
 #import <AppKit/AppKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <LocalAuthenticationEmbeddedUI/LocalAuthenticationEmbeddedUI.h>
 #import <dispatch/dispatch.h>
 
-// Build a context window that floats above the terminal showing which refs are
-// being authenticated for. Same pattern as 1Password / pinentry-mac / ssh-askpass:
-// we show our own informational UI, then the system TouchID dialog appears on top.
-static NSWindow *createContextWindow(NSString *refsText) {
-    NSRect frame = NSMakeRect(0, 0, 520, 260);
-    NSWindow *panel = [[NSPanel alloc]
+@interface OpcliAuthDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, copy) NSString *reason;
+@property(nonatomic, copy) NSString *refsText;
+@property(nonatomic, assign) BOOL success;
+@end
+
+static NSWindow *createAuthWindow(NSString *refsText, LAAuthenticationView *authView) {
+    NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
+    NSRect screenFrame = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1440, 900);
+
+    CGFloat w = 440;
+    CGFloat headerH = 32;
+    CGFloat refsH = 150;
+    CGFloat padding = 16;
+    CGFloat authViewHeight = [authView frame].size.height;
+    CGFloat h = headerH + refsH + authViewHeight + padding * 4;
+
+    CGFloat x = NSMidX(screenFrame) - w / 2;
+    CGFloat y = NSMidY(screenFrame) - h / 2;
+    NSRect frame = NSMakeRect(x, y, w, h);
+
+    NSWindow *win = [[NSWindow alloc]
         initWithContentRect:frame
-        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskUtilityWindow)
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskFullSizeContentView)
         backing:NSBackingStoreBuffered
         defer:NO];
-    [panel setTitle:@"opcli"];
-    [panel setLevel:NSFloatingWindowLevel];
-    [panel setReleasedWhenClosed:NO];
-    [panel setHidesOnDeactivate:NO];
-    [panel center];
+    [win setTitle:@"opcli"];
+    [win setTitlebarAppearsTransparent:YES];
+    [win setTitleVisibility:NSWindowTitleHidden];
+    [win setMovableByWindowBackground:YES];
+    [win setLevel:NSFloatingWindowLevel];
+    [win setReleasedWhenClosed:NO];
 
-    NSView *content = [panel contentView];
-    CGFloat w = frame.size.width;
-    CGFloat h = frame.size.height;
+    NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
+    [bg setMaterial:NSVisualEffectMaterialHUDWindow];
+    [bg setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
+    [bg setState:NSVisualEffectStateActive];
+    [bg setWantsLayer:YES];
+    [[bg layer] setCornerRadius:12];
+    [win setContentView:bg];
 
-    NSTextField *header = [NSTextField labelWithString:@"Touch ID required to read secrets:"];
-    [header setFont:[NSFont boldSystemFontOfSize:13]];
-    [header setFrame:NSMakeRect(20, h - 40, w - 40, 20)];
-    [content addSubview:header];
+    CGFloat cursorY = h - padding;
 
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 50, w - 40, h - 100)];
+    NSTextField *header = [NSTextField labelWithString:@"Touch ID required to read secrets"];
+    [header setFont:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold]];
+    [header setTextColor:[NSColor labelColor]];
+    [header setAlignment:NSTextAlignmentCenter];
+    cursorY -= headerH;
+    [header setFrame:NSMakeRect(padding, cursorY, w - padding * 2, headerH)];
+    [bg addSubview:header];
+
+    cursorY -= padding;
+
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(padding, cursorY - refsH, w - padding * 2, refsH)];
     [scroll setHasVerticalScroller:YES];
     [scroll setAutohidesScrollers:YES];
-    [scroll setBorderType:NSBezelBorder];
-    [scroll setDrawsBackground:YES];
+    [scroll setBorderType:NSNoBorder];
+    [scroll setDrawsBackground:NO];
 
     NSSize contentSize = [scroll contentSize];
     NSTextView *textView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
     [textView setEditable:NO];
     [textView setSelectable:YES];
-    [textView setFont:[NSFont userFixedPitchFontOfSize:11]];
-    [textView setTextContainerInset:NSMakeSize(8, 8)];
+    [textView setDrawsBackground:NO];
+    [textView setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
+    [textView setTextColor:[NSColor labelColor]];
+    [textView setTextContainerInset:NSMakeSize(4, 4)];
     [textView setMinSize:NSMakeSize(0, contentSize.height)];
     [textView setMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
     [textView setVerticallyResizable:YES];
@@ -48,74 +107,105 @@ static NSWindow *createContextWindow(NSString *refsText) {
     [[textView textContainer] setWidthTracksTextView:YES];
     [textView setString:refsText];
     [scroll setDocumentView:textView];
-    [content addSubview:scroll];
+    [bg addSubview:scroll];
 
-    NSTextField *footer = [NSTextField labelWithString:@"Touch the sensor to continue, or cancel to abort."];
-    [footer setFont:[NSFont systemFontOfSize:11]];
-    [footer setTextColor:[NSColor secondaryLabelColor]];
-    [footer setFrame:NSMakeRect(20, 20, w - 40, 18)];
-    [content addSubview:footer];
+    cursorY -= refsH + padding;
 
-    return panel;
+    NSRect avFrame = [authView frame];
+    CGFloat avX = (w - avFrame.size.width) / 2;
+    [authView setFrame:NSMakeRect(avX, cursorY - avFrame.size.height, avFrame.size.width, avFrame.size.height)];
+    [bg addSubview:authView];
+
+    return win;
 }
 
+@implementation OpcliAuthDelegate
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    LAContext *context = [[LAContext alloc] init];
+
+    // LAAuthenticationView only supports biometric-ish policies. If no
+    // biometrics are available, fall back to the classic alert flow — it
+    // won't look unified, but it's still functional.
+    NSError *canErr = nil;
+    BOOL canBiometric = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                                             error:&canErr];
+    if (!canBiometric) {
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+                localizedReason:self.reason
+                          reply:^(BOOL result, NSError *authError) {
+            self.success = result;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [NSApp stop:nil];
+                NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                                   location:NSZeroPoint
+                                              modifierFlags:0 timestamp:0
+                                               windowNumber:0 context:nil
+                                                    subtype:0 data1:0 data2:0];
+                [NSApp postEvent:wake atStart:YES];
+            });
+        }];
+        return;
+    }
+
+    LAAuthenticationView *authView = [[LAAuthenticationView alloc] initWithContext:context];
+    NSWindow *authWindow = createAuthWindow(self.refsText, authView);
+    [authWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+
+    [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+            localizedReason:self.reason
+                      reply:^(BOOL result, NSError *authError) {
+        self.success = result;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [authWindow orderOut:nil];
+            [authWindow close];
+            [NSApp stop:nil];
+            NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                               location:NSZeroPoint
+                                          modifierFlags:0 timestamp:0
+                                           windowNumber:0 context:nil
+                                                subtype:0 data1:0 data2:0];
+            [NSApp postEvent:wake atStart:YES];
+        });
+    }];
+}
+@end
+
 // C interface for Go.
-// If refsText is non-NULL and non-empty, a context window is shown alongside
-// the system TouchID prompt. Otherwise, only the system prompt appears.
+// If refsText is non-NULL and non-empty, an inline authentication window is
+// shown listing the refs. Otherwise, only the standard system prompt appears.
 int authenticateTouchID(const char *reason, const char *refsText) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
         BOOL showWindow = (refsText != NULL && refsText[0] != '\0');
 
-        NSWindow *ctxWindow = nil;
-        if (showWindow) {
-            // Initializing NSApp lets us create and display windows. We run as
-            // an accessory (no dock icon, no menu bar) since opcli is a CLI.
-            [NSApplication sharedApplication];
-            [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-
-            NSString *refsStr = [NSString stringWithUTF8String:refsText];
-            ctxWindow = createContextWindow(refsStr);
-            [ctxWindow makeKeyAndOrderFront:nil];
-            [NSApp activateIgnoringOtherApps:YES];
-
-            // Pump the run loop briefly so the window paints before TouchID appears.
-            for (int i = 0; i < 5; i++) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+        if (!showWindow) {
+            LAContext *context = [[LAContext alloc] init];
+            dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+            __block BOOL success = NO;
+            LAPolicy policy = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+            NSError *error = nil;
+            if (![context canEvaluatePolicy:policy error:&error]) {
+                policy = LAPolicyDeviceOwnerAuthentication;
             }
-        }
-
-        LAContext *context = [[LAContext alloc] init];
-        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-        __block BOOL success = NO;
-
-        LAPolicy policy = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
-        NSError *error = nil;
-        if (![context canEvaluatePolicy:policy error:&error]) {
-            policy = LAPolicyDeviceOwnerAuthentication;
-        }
-
-        [context evaluatePolicy:policy
-                localizedReason:reasonStr
-                          reply:^(BOOL result, NSError *authError) {
-            success = result;
-            dispatch_semaphore_signal(sema);
-        }];
-
-        if (ctxWindow != nil) {
-            // Drive the run loop so the context window keeps rendering while
-            // we wait for the async LAContext reply.
-            while (dispatch_semaphore_wait(sema, DISPATCH_TIME_NOW) != 0) {
-                @autoreleasepool {
-                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
-                }
-            }
-            [ctxWindow orderOut:nil];
-            [ctxWindow close];
-        } else {
+            [context evaluatePolicy:policy
+                    localizedReason:reasonStr
+                              reply:^(BOOL result, NSError *authError) {
+                success = result;
+                dispatch_semaphore_signal(sema);
+            }];
             dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+            return success ? 0 : 1;
         }
 
-        return success ? 0 : 1;
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+        OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
+        delegate.reason = reasonStr;
+        delegate.refsText = [NSString stringWithUTF8String:refsText];
+        [NSApp setDelegate:delegate];
+        [NSApp run];
+        return delegate.success ? 0 : 1;
     }
 }
