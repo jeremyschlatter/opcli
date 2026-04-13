@@ -41,18 +41,10 @@ opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql 
 	@rm -f obfuscation.go
 
 # Run e2e tests
-#
-# The Go test binary itself does in-process keychain operations
-# (keychain_concurrent_test.go), so it must be codesigned — otherwise the
-# keychain returns errSecInteractionNotAllowed (-25308). Use SIGN_IDENTITY
-# when set, fall back to ad-hoc signing so `make test` works without a cert.
 test: libtouchid.a
 	go generate
-	go test -c -o opcli.test ./
-	codesign --sign "$(or $(SIGN_IDENTITY),-)" --options runtime --force opcli.test
-	./opcli.test
-	go test ./migrations/...
-	@rm -f obfuscation.go opcli.test
+	go test ./...
+	@rm -f obfuscation.go
 
 # Sign the binary (required for Touch ID and Keychain ACL)
 sign: opcli
