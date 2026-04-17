@@ -12,6 +12,15 @@ SIGN_IDENTITY ?=
 # Version can be set via command line or defaults to git describe
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
+# LAAuthenticationView (the inline TouchID UI in touchid.m) requires macOS
+# 12+, so pin the deployment target here. MACOSX_DEPLOYMENT_TARGET is read
+# by the plain `clang` invocation below; CGO_CFLAGS carries the same floor
+# into go build / go test (which otherwise inherit whatever MACOSX_DEPLOYMENT_TARGET
+# is set in the shell — e.g. 11.3 from a nix shell).
+MACOS_MIN := 12.0
+export MACOSX_DEPLOYMENT_TARGET := $(MACOS_MIN)
+export CGO_CFLAGS := -mmacosx-version-min=$(MACOS_MIN)
+
 .PHONY: all clean sign test
 
 all: opcli
