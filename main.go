@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,15 @@ import (
 
 	"golang.org/x/term"
 )
+
+// AppKit requires GUI work to happen on pthread_main_np() — the process's
+// initial OS thread. Go's main goroutine starts on that thread but the
+// scheduler is free to migrate it at any blocking point. Locking the main
+// goroutine to its starting thread keeps our cgo call into AppKit (from
+// authenticateTouchID) on the right thread; without this lock we see
+// intermittent SIGTRAPs inside `[NSApp run]` when the goroutine happens to
+// have migrated to a non-main thread by the time we call into Cocoa.
+func init() { runtime.LockOSThread() }
 
 // Timing instrumentation (enabled via OPCLI_TIMING=1)
 var timingEnabled = os.Getenv("OPCLI_TIMING") != ""
