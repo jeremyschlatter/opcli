@@ -111,6 +111,15 @@ func findAncestorTTY() string {
 	return ""
 }
 
+// currentTTYPath returns the TTY device path (e.g. "/dev/ttys003") attached
+// to one of our standard file descriptors, or "" if none is available.
+func currentTTYPath() string {
+	if cTTY := C.getTTYName(); cTTY != nil {
+		return C.GoString(cTTY)
+	}
+	return ""
+}
+
 // getSessionKey returns a unique key for the current terminal session.
 // Based on TTY device + TTY start time, ensuring uniqueness even after TTY reuse.
 func getSessionKey() (string, error) {

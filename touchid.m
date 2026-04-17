@@ -1,32 +1,32 @@
 //go:build !test
 
-// TouchID authentication with an inline context window.
+// TouchID authentication with an inline context window. The window shows:
+//   - "opcli · access requested" title + a monospace sub-line identifying
+//     the invoking command and tty
+//   - vault-grouped list of op:// refs in a bordered box; the field (last
+//     segment) of each ref is highlighted in the accent color so the reader
+//     can scan for "what's being read"
+//   - a footer caption noting that approval opens a 10-minute session
+//   - Cancel button · "Authorize with Touch ID" label · LAAuthenticationView
 //
-// We render a single NSWindow containing:
-//   - title ("opcli access requested") + subtitle ("request to read N secrets")
-//   - a scrollable list of op:// refs grouped by "[account:]vault" header
-//     (each vault's refs in an inner scroll view capped at ~8 visible rows so
-//     very long lists don't push the auth button off-screen)
-//   - an LAAuthenticationView (macOS 12+, biometric UI rendered inline —
-//     no separate SecurityAgent modal) with an "Authorize with Touch ID"
-//     label
-//   - a Cancel button
+// The window is chromeless (titlebar hidden) and uses a warm neutral dark
+// panel. LAAuthenticationView renders Apple's fingerprint glyph inline — we
+// only control its placement and size.
 //
-// Grouped ref payload is passed from Go as JSON, shape:
-//   [{"vault":"Employee","refs":["item/field", ...]}, ...]
+// Payload (JSON, passed from Go):
+//   {"command":"claude deploy.sh", "tty":"ttys003",
+//    "groups":[{"vault":"Employee","refs":["item/field", ...]}, ...]}
 //
-// Fallback: if biometrics aren't available (no Touch ID hardware or accessory
-// not paired), the inline-window path is skipped entirely and we use the
-// classic LAContext.evaluatePolicy dispatch-semaphore flow — no custom
-// window, unstyled, but functional.
+// Fallback: if biometrics aren't available the inline-window path is
+// skipped entirely and we use the classic LAContext.evaluatePolicy
+// dispatch-semaphore flow — no custom window, unstyled, but functional.
 
 #import <AppKit/AppKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <LocalAuthenticationEmbeddedUI/LocalAuthenticationEmbeddedUI.h>
 #import <dispatch/dispatch.h>
 
-// Flipped NSView: y grows downward. Simplifies top-down layout math inside
-// the grouped refs scroll view (default Cocoa is bottom-up).
+// Flipped NSView: y grows downward — simplifies top-down layout math.
 @interface OpcliFlippedView : NSView
 @end
 @implementation OpcliFlippedView
@@ -35,128 +35,324 @@
 
 @interface OpcliAuthDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, copy)   NSString  *reason;
-@property(nonatomic, copy)   NSString  *refsJSON;
+@property(nonatomic, copy)   NSString  *payloadJSON;
 @property(nonatomic, strong) LAContext *context;
 @property(nonatomic, strong) NSWindow  *window;
 @property(nonatomic, assign) BOOL       success;
 - (void)cancelClicked:(id)sender;
 @end
 
-// Build the grouped refs list as a single flipped NSView suitable for
-// hosting inside an NSScrollView. Each vault becomes a header + an inner
-// scroll view containing its refs (capped to ~8 visible rows so very long
-// lists don't push the auth button off-screen). The host is flipped so y
-// grows downward — simpler top-down layout math.
-static NSView *buildGroupedRefsList(NSArray *groups, CGFloat width) {
-    CGFloat rowH = 17;   // matches monospace 11pt line height with a little breathing room
-    CGFloat innerPad = 6;
-    CGFloat innerMaxRows = 8;
-    CGFloat headerH = 20;
-    CGFloat groupSpacing = 14;
-    CGFloat sideInset = 4;
-    CGFloat headerToRefsGap = 4;
+// —————————————————————————————————————————————————————————————
+// Design palette (from the Claude Design handoff). Accent hue 215 in oklch
+// — a soft sky-cyan, converted once to sRGB here.
+// —————————————————————————————————————————————————————————————
+static NSColor *colorPanel(void)        { return [NSColor colorWithSRGBRed:0.090 green:0.075 blue:0.059 alpha:1.0]; } // #17130f
+static NSColor *colorBox(void)          { return [NSColor colorWithSRGBRed:0.118 green:0.102 blue:0.086 alpha:1.0]; } // #1e1a16
+static NSColor *colorStroke(void)       { return [NSColor colorWithSRGBRed:1.000 green:0.941 blue:0.863 alpha:0.08]; }
+static NSColor *colorText(void)         { return [NSColor colorWithSRGBRed:0.957 green:0.929 blue:0.886 alpha:1.0]; }
+static NSColor *colorTextDim(void)      { return [NSColor colorWithSRGBRed:0.655 green:0.624 blue:0.573 alpha:1.0]; }
+static NSColor *colorTextFaint(void)    { return [NSColor colorWithSRGBRed:0.420 green:0.396 blue:0.357 alpha:1.0]; }
+static NSColor *colorAccent(void)       { return [NSColor colorWithSRGBRed:0.171 green:0.799 blue:0.922 alpha:1.0]; } // oklch(0.78 0.13 215)
 
-    NSFont *refFont = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    NSFont *headerFont = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+static NSFont *fontUI(CGFloat sz, NSFontWeight w)   { return [NSFont systemFontOfSize:sz weight:w]; }
+static NSFont *fontMono(CGFloat sz, NSFontWeight w) { return [NSFont monospacedSystemFontOfSize:sz weight:w]; }
 
-    CGFloat contentWidth = width - sideInset * 2;
-
-    // First pass: compute per-section and total heights.
-    NSMutableArray *plans = [NSMutableArray array];
-    CGFloat totalHeight = 0;
-    for (NSDictionary *g in groups) {
-        NSArray<NSString *> *refs = g[@"refs"] ?: @[];
-        CGFloat innerContent = MAX(rowH, refs.count * rowH) + innerPad * 2;
-        CGFloat innerH = MIN(innerContent, innerMaxRows * rowH + innerPad * 2);
-        CGFloat sectionH = headerH + headerToRefsGap + innerH;
-        [plans addObject:@{@"vault": g[@"vault"] ?: @"",
-                           @"refs":  refs,
-                           @"innerH": @(innerH),
-                           @"sectionH": @(sectionH)}];
-        totalHeight += sectionH + groupSpacing;
-    }
-    if (totalHeight > 0) totalHeight -= groupSpacing;
-
-    OpcliFlippedView *host = [[OpcliFlippedView alloc] initWithFrame:
-        NSMakeRect(0, 0, width, totalHeight)];
-
-    // Second pass: lay out top-down (flipped coords).
-    CGFloat y = 0;
-    for (NSDictionary *plan in plans) {
-        NSTextField *header = [NSTextField labelWithString:
-            [NSString stringWithFormat:@"# %@", plan[@"vault"]]];
-        [header setFont:headerFont];
-        [header setTextColor:[NSColor labelColor]];
-        [header setFrame:NSMakeRect(sideInset, y, contentWidth, headerH)];
-        [host addSubview:header];
-        y += headerH + headerToRefsGap;
-
-        CGFloat innerH = [plan[@"innerH"] doubleValue];
-        NSScrollView *innerScroll = [[NSScrollView alloc] initWithFrame:
-            NSMakeRect(sideInset, y, contentWidth, innerH)];
-        [innerScroll setHasVerticalScroller:YES];
-        // Keep the scroller visible even when not scrolling, so the user can
-        // see there are more refs than fit. Legacy style always draws the
-        // track — overlay style fades out.
-        [innerScroll setAutohidesScrollers:NO];
-        [innerScroll setScrollerStyle:NSScrollerStyleLegacy];
-        [innerScroll setBorderType:NSNoBorder];
-        [innerScroll setDrawsBackground:NO];
-        [innerScroll setTranslatesAutoresizingMaskIntoConstraints:YES];
-
-        NSSize innerContentSize = [innerScroll contentSize];
-        NSArray *refs = plan[@"refs"];
-        NSMutableAttributedString *refsAttr = [[NSMutableAttributedString alloc] init];
-        for (NSUInteger i = 0; i < refs.count; i++) {
-            if (i > 0) {
-                [refsAttr appendAttributedString:[[NSAttributedString alloc]
-                    initWithString:@"\n"]];
-            }
-            [refsAttr appendAttributedString:[[NSAttributedString alloc]
-                initWithString:refs[i]
-                attributes:@{NSFontAttributeName: refFont,
-                             NSForegroundColorAttributeName: [NSColor labelColor]}]];
+// Render a single ref (passed in as "item/[section/]field" — already
+// stripped of "op://vault/") as an attributed string:
+//   last segment (field)   → accent + semibold
+//   first segment (item)   → bright text
+//   middle segments        → dim text
+//   slashes                → faint
+static NSAttributedString *renderRefAttr(NSString *ref) {
+    NSArray<NSString *> *parts = [ref componentsSeparatedByString:@"/"];
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
+    NSUInteger n = parts.count;
+    for (NSUInteger i = 0; i < n; i++) {
+        NSColor *c;
+        NSFont  *f = fontMono(12, NSFontWeightRegular);
+        if (i == n - 1) { c = colorAccent(); f = fontMono(12, NSFontWeightSemibold); }
+        else if (i == 0) { c = colorText(); }
+        else { c = colorTextDim(); }
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:parts[i] attributes:@{
+            NSFontAttributeName: f,
+            NSForegroundColorAttributeName: c,
+        }]];
+        if (i < n - 1) {
+            [out appendAttributedString:[[NSAttributedString alloc] initWithString:@"/" attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextFaint(),
+            }]];
         }
-        CGFloat docH = MAX(innerContentSize.height, refs.count * rowH + innerPad * 2);
-        NSTextView *tv = [[NSTextView alloc] initWithFrame:
-            NSMakeRect(0, 0, innerContentSize.width, docH)];
-        [tv setEditable:NO];
-        [tv setSelectable:YES];
-        [tv setDrawsBackground:NO];
-        [tv setTextContainerInset:NSMakeSize(innerPad, innerPad)];
-        [tv setMinSize:NSMakeSize(0, 0)];
-        [tv setMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
-        [tv setVerticallyResizable:YES];
-        [tv setHorizontallyResizable:NO];
-        [[tv textContainer] setWidthTracksTextView:YES];
-        [[tv textStorage] setAttributedString:refsAttr];
-        [innerScroll setDocumentView:tv];
-        [host addSubview:innerScroll];
-        y += innerH + groupSpacing;
     }
-
-    return host;
+    return out;
 }
 
-// Construct the authorization window and install authView as the biometric
-// indicator. authView is typically an LAAuthenticationView already paired
-// with the LAContext that will be evaluated.
-static NSWindow *buildAuthWindow(NSString *refsJSON, NSView *authView,
-                                 NSInteger secretCount, id cancelTarget) {
-    NSData *data = [refsJSON dataUsingEncoding:NSUTF8StringEncoding];
-    NSArray *groups = [NSJSONSerialization JSONObjectWithData:data
-                                                      options:0
-                                                        error:nil];
-    if (![groups isKindOfClass:[NSArray class]]) groups = @[];
+// Header: "opcli · access requested" title + optional monospace sub-line
+// "$ <command>  ·  <tty>". Either command or tty may be empty; the sub-line
+// is suppressed if both are.
+static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width) {
+    OpcliFlippedView *v = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,width,0)];
+
+    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
+    [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"opcli" attributes:@{
+        NSFontAttributeName: fontUI(15, NSFontWeightSemibold),
+        NSForegroundColorAttributeName: colorText(),
+    }]];
+    [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"   ·   " attributes:@{
+        NSFontAttributeName: fontUI(15, NSFontWeightRegular),
+        NSForegroundColorAttributeName: colorTextFaint(),
+    }]];
+    [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"access requested" attributes:@{
+        NSFontAttributeName: fontUI(15, NSFontWeightMedium),
+        NSForegroundColorAttributeName: colorTextDim(),
+    }]];
+    NSTextField *titleField = [NSTextField labelWithAttributedString:title];
+    [titleField setFrame:NSMakeRect(0, 0, width, 20)];
+    [v addSubview:titleField];
+
+    CGFloat y = 22;
+    if (command.length || tty.length) {
+        NSMutableAttributedString *sub = [[NSMutableAttributedString alloc] init];
+        if (command.length) {
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"$ " attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextFaint(),
+            }]];
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:command attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextDim(),
+            }]];
+        }
+        if (command.length && tty.length) {
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"   ·   " attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextFaint(),
+            }]];
+        }
+        if (tty.length) {
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:tty attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextDim(),
+            }]];
+        }
+        NSTextField *subField = [NSTextField labelWithAttributedString:sub];
+        [subField setLineBreakMode:NSLineBreakByTruncatingTail];
+        [subField setFrame:NSMakeRect(0, y, width, 16)];
+        [v addSubview:subField];
+        y += 18;
+    }
+
+    [v setFrame:NSMakeRect(0, 0, width, y)];
+    return v;
+}
+
+// One vault section inside the secrets box: header line + one row per ref.
+static NSView *buildVaultSection(NSString *vault, NSArray<NSString *> *refs, CGFloat contentW) {
+    OpcliFlippedView *v = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,contentW,0)];
+    CGFloat hPad = 12;
+    CGFloat bulletCol = 16;
+    CGFloat gap = 8;
+    CGFloat y = 10;
+
+    // Vault header: "<vault>   · <N>"
+    NSMutableAttributedString *hdr = [[NSMutableAttributedString alloc] init];
+    [hdr appendAttributedString:[[NSAttributedString alloc] initWithString:vault attributes:@{
+        NSFontAttributeName: fontUI(12, NSFontWeightSemibold),
+        NSForegroundColorAttributeName: colorText(),
+    }]];
+    [hdr appendAttributedString:[[NSAttributedString alloc] initWithString:
+        [NSString stringWithFormat:@"   · %lu", (unsigned long)refs.count] attributes:@{
+        NSFontAttributeName: fontMono(11, NSFontWeightRegular),
+        NSForegroundColorAttributeName: colorTextFaint(),
+    }]];
+    NSTextField *hdrField = [NSTextField labelWithAttributedString:hdr];
+    [hdrField setFrame:NSMakeRect(hPad, y, contentW - 2*hPad, 16)];
+    [v addSubview:hdrField];
+    y += 16 + 6;
+
+    CGFloat pathX = hPad + bulletCol + gap;
+    CGFloat pathW = contentW - pathX - hPad;
+
+    for (NSString *r in refs) {
+        NSAttributedString *attr = renderRefAttr(r);
+
+        NSTextField *path = [NSTextField wrappingLabelWithString:@""];
+        [path setAttributedStringValue:attr];
+        [path setSelectable:YES];
+        [path setToolTip:[NSString stringWithFormat:@"op://%@/%@", vault, r]];
+        NSSize sz = [path sizeThatFits:NSMakeSize(pathW, CGFLOAT_MAX)];
+        CGFloat h = MAX(18, ceil(sz.height));
+        [path setFrame:NSMakeRect(pathX, y, pathW, h)];
+        [v addSubview:path];
+
+        NSTextField *bullet = [NSTextField labelWithAttributedString:
+            [[NSAttributedString alloc] initWithString:@"›" attributes:@{
+                NSFontAttributeName: fontMono(10, NSFontWeightRegular),
+                NSForegroundColorAttributeName: colorTextFaint(),
+            }]];
+        [bullet setAlignment:NSTextAlignmentCenter];
+        [bullet setFrame:NSMakeRect(hPad + 6, y + 2, bulletCol, 14)];
+        [v addSubview:bullet];
+
+        y += h + 4;
+    }
+    y += 4;
+    [v setFrame:NSMakeRect(0, 0, contentW, y)];
+    return v;
+}
+
+// Full secrets list: vault sections stacked with hairline dividers.
+static NSView *buildSecretsList(NSArray *groups, CGFloat contentW) {
+    OpcliFlippedView *v = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,contentW,0)];
+    CGFloat y = 0;
+    for (NSUInteger i = 0; i < groups.count; i++) {
+        NSDictionary *g = groups[i];
+        NSArray *refs = g[@"refs"];
+        if (![refs isKindOfClass:[NSArray class]]) refs = @[];
+        NSString *vault = g[@"vault"] ?: @"";
+
+        if (i > 0) {
+            // Hairline divider between vaults (design uses a dashed line;
+            // a solid 1px rule reads the same at this size).
+            NSView *div = [[NSView alloc] initWithFrame:NSMakeRect(6, y, contentW - 12, 1)];
+            [div setWantsLayer:YES];
+            [div.layer setBackgroundColor:[colorStroke() CGColor]];
+            [v addSubview:div];
+            y += 1;
+        }
+        NSView *section = buildVaultSection(vault, refs, contentW);
+        [section setFrameOrigin:NSMakePoint(0, y)];
+        [v addSubview:section];
+        y += section.frame.size.height;
+    }
+    [v setFrame:NSMakeRect(0, 0, contentW, y)];
+    return v;
+}
+
+// The boxed secrets container: rounded background + border + an inner
+// scroll view that clips content to 260px max height.
+static NSView *buildSecretsBox(NSArray *groups, CGFloat width) {
+    NSView *list = buildSecretsList(groups, width);
+    CGFloat listH = list.frame.size.height;
+    CGFloat maxH  = 260;
+    CGFloat boxH  = MIN(listH, maxH);
+
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0,0,width,boxH)];
+    [box setWantsLayer:YES];
+    [box.layer setBackgroundColor:[colorBox() CGColor]];
+    [box.layer setBorderColor:[colorStroke() CGColor]];
+    [box.layer setBorderWidth:1.0];
+    [box.layer setCornerRadius:10.0];
+    [box.layer setMasksToBounds:YES];
+
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,width,boxH)];
+    [scroll setHasVerticalScroller:YES];
+    [scroll setAutohidesScrollers:YES];
+    [scroll setBorderType:NSNoBorder];
+    [scroll setDrawsBackground:NO];
+    [scroll setDocumentView:list];
+    [box addSubview:scroll];
+
+    return box;
+}
+
+// Footer caption: "Also grants this terminal 10 min of unprompted access to
+// any secret." "10 min" is emphasized slightly so the duration pops.
+static NSView *buildFooterCaption(CGFloat contentW) {
+    NSDictionary *faint = @{
+        NSFontAttributeName: fontMono(11, NSFontWeightRegular),
+        NSForegroundColorAttributeName: colorTextFaint(),
+    };
+    NSDictionary *emph = @{
+        NSFontAttributeName: fontMono(11, NSFontWeightSemibold),
+        NSForegroundColorAttributeName: colorTextDim(),
+    };
+    NSMutableAttributedString *a = [[NSMutableAttributedString alloc] init];
+    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"Also grants this terminal " attributes:faint]];
+    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"10 min" attributes:emph]];
+    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@" of unprompted access to any secret." attributes:faint]];
+
+    NSTextField *f = [NSTextField wrappingLabelWithString:@""];
+    [f setAttributedStringValue:a];
+    NSSize sz = [f sizeThatFits:NSMakeSize(contentW, CGFLOAT_MAX)];
+    CGFloat h = ceil(sz.height);
+    [f setFrame:NSMakeRect(0, 0, contentW, h)];
+    return f;
+}
+
+// Bottom auth row: Cancel (left) · flex spacer · "Authorize with Touch ID"
+// label · LAAuthenticationView (right).
+static NSView *buildAuthRow(NSView *authView, id cancelTarget, CGFloat windowW) {
+    CGFloat hPad = 18;
+    CGFloat rowH = 34;
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0,0,windowW,rowH)];
+
+    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:cancelTarget action:@selector(cancelClicked:)];
+    [cancel setBezelStyle:NSBezelStyleRounded];
+    [cancel setKeyEquivalent:@"\033"]; // Esc
+    NSSize cSize = [cancel fittingSize];
+    if (cSize.width < 80) cSize.width = 80;
+    [cancel setFrame:NSMakeRect(hPad, (rowH - cSize.height) / 2, cSize.width, cSize.height)];
+    [row addSubview:cancel];
+
+    NSSize avSize = [authView fittingSize];
+    if (avSize.width == 0 || avSize.height == 0) avSize = [authView frame].size;
+    if (avSize.width == 0 || avSize.height == 0) avSize = NSMakeSize(32, 32);
+    CGFloat avX = windowW - hPad - avSize.width;
+    [authView setFrame:NSMakeRect(avX, (rowH - avSize.height) / 2, avSize.width, avSize.height)];
+    [row addSubview:authView];
+
+    NSMutableAttributedString *lbl = [[NSMutableAttributedString alloc] init];
+    [lbl appendAttributedString:[[NSAttributedString alloc] initWithString:@"Authorize with " attributes:@{
+        NSFontAttributeName: fontUI(13, NSFontWeightRegular),
+        NSForegroundColorAttributeName: colorTextDim(),
+    }]];
+    [lbl appendAttributedString:[[NSAttributedString alloc] initWithString:@"Touch ID" attributes:@{
+        NSFontAttributeName: fontUI(13, NSFontWeightSemibold),
+        NSForegroundColorAttributeName: colorText(),
+    }]];
+    NSTextField *label = [NSTextField labelWithAttributedString:lbl];
+    NSSize lSize = [label fittingSize];
+    CGFloat lX = avX - 10 - lSize.width;
+    [label setFrame:NSMakeRect(lX, (rowH - lSize.height) / 2, lSize.width, lSize.height)];
+    [row addSubview:label];
+
+    return row;
+}
+
+static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id cancelTarget) {
+    NSData *data = [payloadJSON dataUsingEncoding:NSUTF8StringEncoding];
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *payload = [obj isKindOfClass:[NSDictionary class]] ? obj : @{};
+    NSString *command = payload[@"command"]; if (![command isKindOfClass:[NSString class]]) command = @"";
+    NSString *tty     = payload[@"tty"];     if (![tty     isKindOfClass:[NSString class]]) tty = @"";
+    NSArray  *groups  = payload[@"groups"];  if (![groups  isKindOfClass:[NSArray  class]]) groups = @[];
+
+    CGFloat w = 440;
+    CGFloat hPad = 22;
+    CGFloat contentW = w - 2*hPad;
+
+    NSView *header     = buildHeader(command, tty, contentW);
+    NSView *secretsBox = buildSecretsBox(groups, contentW);
+    NSView *caption    = buildFooterCaption(contentW);
+    NSView *authRow    = buildAuthRow(authView, cancelTarget, w);
+
+    CGFloat headerH  = header.frame.size.height;
+    CGFloat boxH     = secretsBox.frame.size.height;
+    CGFloat captionH = caption.frame.size.height;
+    CGFloat authRowH = authRow.frame.size.height;
+
+    CGFloat topPad         = 20;
+    CGFloat bottomPad      = 16;
+    CGFloat gapHeadBox     = 14;
+    CGFloat gapBoxCaption  = 14;
+    CGFloat gapCaptionAuth = 12;
+    CGFloat totalH = topPad + headerH + gapHeadBox + boxH + gapBoxCaption
+                   + captionH + gapCaptionAuth + authRowH + bottomPad;
 
     NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
-    NSRect screenFrame = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1440, 900);
-
-    CGFloat w = 460;
-    CGFloat h = 480;
-    NSRect frame = NSMakeRect(NSMidX(screenFrame) - w / 2,
-                              NSMidY(screenFrame) - h / 2,
-                              w, h);
+    NSRect sf = screen ? [screen visibleFrame] : NSMakeRect(0,0,1440,900);
+    NSRect frame = NSMakeRect(NSMidX(sf) - w/2, NSMidY(sf) - totalH/2, w, totalH);
 
     NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskFullSizeContentView)
@@ -168,96 +364,20 @@ static NSWindow *buildAuthWindow(NSString *refsJSON, NSView *authView,
     [win setMovableByWindowBackground:YES];
     [win setLevel:NSFloatingWindowLevel];
     [win setReleasedWhenClosed:NO];
-    // Force dark appearance so the dialog looks consistent regardless of
-    // system Light/Dark mode — matches 1Password's own auth dialog chrome.
+    // Force dark appearance — we want the same panel regardless of system
+    // Light/Dark mode.
     [win setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
 
-    NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
-    [bg setMaterial:NSVisualEffectMaterialHUDWindow];
-    [bg setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
-    [bg setState:NSVisualEffectStateActive];
-    [bg setWantsLayer:YES];
-    [[bg layer] setCornerRadius:12];
-    [win setContentView:bg];
+    OpcliFlippedView *root = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,w,totalH)];
+    [root setWantsLayer:YES];
+    [root.layer setBackgroundColor:[colorPanel() CGColor]];
+    [win setContentView:root];
 
-    CGFloat padding = 20;
-
-    // --- Top: title + subtitle ---
-    CGFloat cursorY = h - padding;
-    CGFloat titleH = 24;
-    cursorY -= titleH;
-    NSTextField *title = [NSTextField labelWithString:@"opcli access requested"];
-    [title setFont:[NSFont systemFontOfSize:17 weight:NSFontWeightSemibold]];
-    [title setTextColor:[NSColor labelColor]];
-    [title setAlignment:NSTextAlignmentCenter];
-    [title setFrame:NSMakeRect(padding, cursorY, w - padding * 2, titleH)];
-    [bg addSubview:title];
-
-    CGFloat subtitleH = 18;
-    cursorY -= subtitleH + 2;
-    NSString *subtitleText = [NSString stringWithFormat:@"request to read %ld %@",
-                              (long)secretCount,
-                              secretCount == 1 ? @"secret" : @"secrets"];
-    NSTextField *subtitle = [NSTextField labelWithString:subtitleText];
-    [subtitle setFont:[NSFont systemFontOfSize:12 weight:NSFontWeightRegular]];
-    [subtitle setTextColor:[NSColor secondaryLabelColor]];
-    [subtitle setAlignment:NSTextAlignmentCenter];
-    [subtitle setFrame:NSMakeRect(padding, cursorY, w - padding * 2, subtitleH)];
-    [bg addSubview:subtitle];
-
-    // --- Bottom: cancel button + auth label + auth view ---
-    CGFloat bottomY = padding;
-
-    NSButton *cancel = [NSButton buttonWithTitle:@"Cancel"
-                                          target:cancelTarget
-                                          action:@selector(cancelClicked:)];
-    [cancel setBezelStyle:NSBezelStyleRounded];
-    [cancel setKeyEquivalent:@"\033"]; // Esc
-    [cancel setFrame:NSMakeRect(padding, bottomY, 100, 28)];
-    [bg addSubview:cancel];
-
-    NSSize avSize = [authView fittingSize];
-    if (avSize.width == 0 || avSize.height == 0) avSize = [authView frame].size;
-    if (avSize.width == 0 || avSize.height == 0) avSize = NSMakeSize(32, 32);
-
-    CGFloat authLabelH = 18;
-    CGFloat authBlockTopPad = 14;
-    CGFloat authLabelY = bottomY + 28 + authBlockTopPad;
-    NSMutableAttributedString *authText = [[NSMutableAttributedString alloc]
-        initWithString:@"Authorize with "
-            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12],
-                         NSForegroundColorAttributeName: [NSColor labelColor]}];
-    [authText appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"Touch ID"
-            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12
-                                                                 weight:NSFontWeightSemibold],
-                         NSForegroundColorAttributeName: [NSColor labelColor]}]];
-    NSTextField *authLabel = [NSTextField labelWithAttributedString:authText];
-    [authLabel setAlignment:NSTextAlignmentCenter];
-    [authLabel setFrame:NSMakeRect(padding, authLabelY, w - padding * 2, authLabelH)];
-    [bg addSubview:authLabel];
-
-    CGFloat authViewY = authLabelY + authLabelH + 6;
-    CGFloat avX = (w - avSize.width) / 2;
-    [authView setFrame:NSMakeRect(avX, authViewY, avSize.width, avSize.height)];
-    [bg addSubview:authView];
-
-    // --- Middle: refs list in an outer scroll view ---
-    CGFloat refsTop = cursorY - 10;
-    CGFloat refsBottom = authViewY + avSize.height + 18;
-    CGFloat refsH = refsTop - refsBottom;
-
-    NSScrollView *outerScroll = [[NSScrollView alloc] initWithFrame:
-        NSMakeRect(padding, refsBottom, w - padding * 2, refsH)];
-    [outerScroll setHasVerticalScroller:YES];
-    [outerScroll setAutohidesScrollers:YES];
-    [outerScroll setBorderType:NSNoBorder];
-    [outerScroll setDrawsBackground:NO];
-
-    NSView *groupedList = buildGroupedRefsList(groups, [outerScroll contentSize].width);
-    [outerScroll setDocumentView:groupedList];
-
-    [bg addSubview:outerScroll];
+    CGFloat y = topPad;
+    [header setFrameOrigin:NSMakePoint(hPad, y)];      [root addSubview:header];     y += headerH + gapHeadBox;
+    [secretsBox setFrameOrigin:NSMakePoint(hPad, y)];  [root addSubview:secretsBox]; y += boxH + gapBoxCaption;
+    [caption setFrameOrigin:NSMakePoint(hPad, y)];     [root addSubview:caption];    y += captionH + gapCaptionAuth;
+    [authRow setFrameOrigin:NSMakePoint(0, y)];        [root addSubview:authRow];
 
     return win;
 }
@@ -281,23 +401,12 @@ static NSWindow *buildAuthWindow(NSString *refsJSON, NSView *authView,
         return;
     }
 
-    // Count secrets across all vault groups for the subtitle.
-    NSInteger secretCount = 0;
-    NSData *data = [self.refsJSON dataUsingEncoding:NSUTF8StringEncoding];
-    NSArray *groups = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if ([groups isKindOfClass:[NSArray class]]) {
-        for (NSDictionary *g in groups) {
-            NSArray *refs = g[@"refs"];
-            if ([refs isKindOfClass:[NSArray class]]) secretCount += refs.count;
-        }
-    }
-
-    // .small (32x32) fingerprint — .regular (64x64) was reported as too
-    // large against our window size.
+    // .small (32x32) matches the design; .regular (64x64) is too large
+    // against our window size.
     LAAuthenticationView *authView = [[LAAuthenticationView alloc]
         initWithContext:self.context controlSize:NSControlSizeSmall];
 
-    self.window = buildAuthWindow(self.refsJSON, authView, secretCount, self);
+    self.window = buildAuthWindow(self.payloadJSON, authView, self);
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
@@ -339,8 +448,7 @@ static NSWindow *buildAuthWindow(NSString *refsJSON, NSView *authView,
 
 // C interface for Go.
 // If refsText is non-NULL and non-empty, an inline authorization window is
-// shown listing the grouped refs. Otherwise, only the standard system
-// prompt appears (no window).
+// shown. Otherwise, only the standard system prompt appears (no window).
 int authenticateTouchID(const char *reason, const char *refsText) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
@@ -370,7 +478,7 @@ int authenticateTouchID(const char *reason, const char *refsText) {
 
         OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
         delegate.reason = reasonStr;
-        delegate.refsJSON = [NSString stringWithUTF8String:refsText];
+        delegate.payloadJSON = [NSString stringWithUTF8String:refsText];
         [NSApp setDelegate:delegate];
         [NSApp run];
         return delegate.success ? 0 : 1;
