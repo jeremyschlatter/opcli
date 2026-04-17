@@ -124,7 +124,7 @@ static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width) {
             }]];
         }
         if (command.length && tty.length) {
-            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"   ·   " attributes:@{
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@" · " attributes:@{
                 NSFontAttributeName: fontMono(12, NSFontWeightRegular),
                 NSForegroundColorAttributeName: colorTextFaint(),
             }]];
@@ -161,7 +161,7 @@ static NSView *buildVaultSection(NSString *vault, NSArray<NSString *> *refs, CGF
         NSForegroundColorAttributeName: colorText(),
     }]];
     [hdr appendAttributedString:[[NSAttributedString alloc] initWithString:
-        [NSString stringWithFormat:@"   · %lu", (unsigned long)refs.count] attributes:@{
+        [NSString stringWithFormat:@" · %lu", (unsigned long)refs.count] attributes:@{
         NSFontAttributeName: fontMono(11, NSFontWeightRegular),
         NSForegroundColorAttributeName: colorTextFaint(),
     }]];
