@@ -1600,6 +1600,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		dbglog("run: exec'ing into child (tui): %s", cmdArgs[0])
 		return 0, syscall.Exec(binary, cmdArgs, finalEnv)
 	}
 
@@ -1620,9 +1621,11 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		defer stderrMask.Close()
 	}
 
+	dbglog("run: starting child: %s", cmdArgs[0])
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
+	dbglog("run: child started (pid=%d)", cmd.Process.Pid)
 
 	// Catch signals and forward them to the child. This prevents Go's
 	// runtime from killing us before the child finishes its cleanup.
@@ -1635,6 +1638,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	}()
 
 	err := cmd.Wait()
+	dbglog("run: child exited (err=%v)", err)
 	signal.Stop(sigCh)
 	close(sigCh)
 

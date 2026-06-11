@@ -75,6 +75,23 @@ func getSessionPath() (string, error) {
 	return filepath.Join(dir, sessionFile), nil
 }
 
+// dbglog appends a timestamped line to ~/.opcli/touchid-debug.log, to
+// diagnose an intermittent hang at the TouchID auth window. Always on;
+// best-effort (logging must never break a read). The ObjC side (touchid.m)
+// logs to the same file. Remove once the hang is understood.
+func dbglog(format string, args ...any) {
+	dir, err := getDataDir()
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "touchid-debug.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s [%d] go: %s\n", time.Now().Format("2006-01-02 15:04:05.000"), os.Getpid(), fmt.Sprintf(format, args...))
+}
+
 // testSessionKey can be set by test builds to override session key detection.
 var testSessionKey string
 

@@ -71,3 +71,6 @@ jobs:
         with:
           files: ${{ env.ARCHIVE }}
           generate_release_notes: true
+          # Hyphenated tags (eg v0.13.1-pre1) are pre-releases: hidden from
+          # /releases/latest so regular users don't pick them up.
+          prerelease: ${{ contains(github.ref_name, '-') }}

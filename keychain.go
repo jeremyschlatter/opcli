@@ -458,7 +458,10 @@ func AuthenticateBiometric(reason string, refs []string) error {
 	cRefs := C.CString(refsText)
 	defer C.free(unsafe.Pointer(cRefs))
 
-	if C.authenticateTouchID(cReason, cRefs) != 0 {
+	dbglog("AuthenticateBiometric: calling authenticateTouchID (%d refs)", len(refs))
+	rc := C.authenticateTouchID(cReason, cRefs)
+	dbglog("AuthenticateBiometric: authenticateTouchID returned %d", rc)
+	if rc != 0 {
 		return fmt.Errorf("authentication failed or cancelled")
 	}
 	return nil
