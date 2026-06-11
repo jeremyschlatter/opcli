@@ -504,7 +504,10 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
 // C interface for Go.
 // If refsText is non-NULL and non-empty, an inline authorization window is
 // shown. Otherwise, only the standard system prompt appears (no window).
-int authenticateTouchID(const char *reason, const char *refsText) {
+// iconPNG/iconPNGLen carry the app logo, shown in the Dock while the
+// authorization window is up.
+int authenticateTouchID(const char *reason, const char *refsText,
+                        const void *iconPNG, int iconPNGLen) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
         BOOL showWindow = (refsText != NULL && refsText[0] != '\0');
@@ -534,6 +537,9 @@ int authenticateTouchID(const char *reason, const char *refsText) {
 
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp setApplicationIconImage:
+            [[NSImage alloc] initWithData:
+                [NSData dataWithBytes:iconPNG length:iconPNGLen]]];
 
         OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
         delegate.reason = reasonStr;

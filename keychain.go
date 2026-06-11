@@ -67,7 +67,8 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 #pragma clang diagnostic pop
 
 // Defined in touchid.m, linked via libtouchid.a
-extern int authenticateTouchID(const char *reason, const char *refsText);
+extern int authenticateTouchID(const char *reason, const char *refsText,
+                               const void *iconPNG, int iconPNGLen);
 
 // Add or update a keychain item with app-only access
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
@@ -162,6 +163,7 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -447,6 +449,11 @@ func SetDefaultAccount(accountUUID string) error {
 	return saveCredentialStore(store)
 }
 
+// dockIconPNG is shown in the Dock while the authorization window is up.
+//
+//go:embed assets/logo.png
+var dockIconPNG []byte
+
 // AuthenticateBiometric prompts for Touch ID or password using LAContext.
 // When refs is non-empty, a context window is shown alongside the system
 // TouchID dialog listing the op:// references being authenticated for.
@@ -459,7 +466,8 @@ func AuthenticateBiometric(reason string, refs []string) error {
 	defer C.free(unsafe.Pointer(cRefs))
 
 	dbglog("AuthenticateBiometric: calling authenticateTouchID (%d refs)", len(refs))
-	rc := C.authenticateTouchID(cReason, cRefs)
+	rc := C.authenticateTouchID(cReason, cRefs,
+		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
 	dbglog("AuthenticateBiometric: authenticateTouchID returned %d", rc)
 	if rc != 0 {
 		return fmt.Errorf("authentication failed or cancelled")

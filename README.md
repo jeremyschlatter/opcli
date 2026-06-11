@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="160" alt="opcli logo"></p>
+
 # opcli
 
 A fast, local 1Password CLI alternative. Reads directly from 1Password's local SQLite database instead of making network calls.
