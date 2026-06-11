@@ -474,6 +474,10 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
 
 - (void)stopApp {
     dbglog("stopApp: enter (window=%d)", self.window != nil);
+    // Tear down the auth session before the window: the fingerprint UI
+    // inside LAAuthenticationView is rendered by a separate system process
+    // and composited into our window; detach it before the window goes away.
+    [self.context invalidate];
     if (self.window) {
         [self.window orderOut:nil];
         [self.window close];
@@ -538,6 +542,43 @@ int authenticateTouchID(const char *reason, const char *refsText) {
         [NSApp run];
         dbglog("authenticateTouchID: NSApp run returned, returning %d",
             delegate.success ? 0 : 1);
+
+        // Drop back out of the Dock — otherwise an "opcli" icon lingers for
+        // as long as the process lives (the whole child run, under `opcli run`).
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+
+        // We're about to abandon the run loop for good (Go takes the main
+        // thread back), but the window-server side of the window teardown
+        // can lag the app-side orderOut/close: debug logs from a hang showed
+        // isVisible=0 and a clean run-loop exit while the window stayed on
+        // screen, frozen, for the life of the process (~1/4 of auths). Pump
+        // the loop until the window server reports no windows for this pid,
+        // capped at 500ms.
+        {
+            pid_t me = getpid();
+            int passes = 0;
+            BOOL clear = NO;
+            CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.5;
+            for (;;) {
+                int mine = 0;
+                CFArrayRef list = CGWindowListCopyWindowInfo(
+                    kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+                if (list) {
+                    for (CFIndex i = 0; i < CFArrayGetCount(list); i++) {
+                        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+                        if ([info[(__bridge id)kCGWindowOwnerPID] intValue] == me) mine++;
+                    }
+                    CFRelease(list);
+                }
+                if (mine == 0) { clear = YES; break; }
+                if (CFAbsoluteTimeGetCurrent() >= deadline) break;
+                passes++;
+                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            }
+            dbglog("post-run window flush: passes=%d clear=%d", passes, clear);
+        }
+
         return delegate.success ? 0 : 1;
     }
 }
