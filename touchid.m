@@ -25,46 +25,7 @@
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <LocalAuthenticationEmbeddedUI/LocalAuthenticationEmbeddedUI.h>
 #import <dispatch/dispatch.h>
-#include <fcntl.h>
-#include <stdarg.h>
-#include <sys/stat.h>
-#include <sys/time.h>
 #include <unistd.h>
-
-// Debug logging to ~/.opcli/touchid-debug.log, to diagnose an intermittent
-// hang where the auth window stays on screen (and possibly the run loop
-// never exits) after a successful TouchID scan. Always on; best-effort
-// (silently disabled if the file can't be opened). Remove once the hang is
-// understood. The Go side logs to the same file via dbglog in session.go.
-static void dbglog(const char *fmt, ...) {
-    static int fd = -1;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        const char *home = getenv("HOME");
-        if (!home) return;
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/.opcli", home);
-        mkdir(path, 0700);
-        snprintf(path, sizeof(path), "%s/.opcli/touchid-debug.log", home);
-        fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600);
-    });
-    if (fd < 0) return;
-
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    struct tm tm;
-    localtime_r(&tv.tv_sec, &tm);
-    char buf[2048];
-    int n = snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%03d [%d] objc: ",
-        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-        tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000), getpid());
-    va_list ap;
-    va_start(ap, fmt);
-    n += vsnprintf(buf + n, sizeof(buf) - n - 1, fmt, ap);
-    va_end(ap);
-    buf[n++] = '\n';
-    write(fd, buf, n);
-}
 
 // Flipped NSView: y grows downward — simplifies top-down layout math.
 @interface OpcliFlippedView : NSView
@@ -431,14 +392,10 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
         canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                     error:&canErr];
     if (!canBiometric) {
-        dbglog("no biometrics (%s); using classic dialog fallback",
-            canErr ? canErr.description.UTF8String : "no error");
         // Fallback: no biometrics → classic alert flow, no custom window.
         [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
                      localizedReason:self.reason
                                reply:^(BOOL result, NSError *authError) {
-            dbglog("reply fired (fallback): success=%d err=%s", result,
-                authError ? authError.description.UTF8String : "none");
             self.success = result;
             dispatch_async(dispatch_get_main_queue(), ^{ [self stopApp]; });
         }];
@@ -453,27 +410,22 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     self.window = buildAuthWindow(self.payloadJSON, authView, self);
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
-    dbglog("auth window shown");
 
     [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                  localizedReason:self.reason
                            reply:^(BOOL result, NSError *authError) {
-        dbglog("reply fired: success=%d err=%s", result,
-            authError ? authError.description.UTF8String : "none");
         self.success = result;
         dispatch_async(dispatch_get_main_queue(), ^{ [self stopApp]; });
     }];
 }
 
 - (void)cancelClicked:(id)sender {
-    dbglog("cancel clicked");
     // Invalidate the context so the pending evaluatePolicy reply fires with
     // a cancelation error; its callback will then call stopApp as normal.
     [self.context invalidate];
 }
 
 - (void)stopApp {
-    dbglog("stopApp: enter (window=%d)", self.window != nil);
     // Tear down the auth session before the window: the fingerprint UI
     // inside LAAuthenticationView is rendered by a separate system process
     // and composited into our window; detach it before the window goes away.
@@ -481,7 +433,6 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     if (self.window) {
         [self.window orderOut:nil];
         [self.window close];
-        dbglog("stopApp: window closed (isVisible=%d)", self.window.isVisible);
         self.window = nil;
     }
     [NSApp stop:nil];
@@ -497,7 +448,6 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
                                           data1:0
                                           data2:0];
     [NSApp postEvent:wake atStart:YES];
-    dbglog("stopApp: NSApp stop called, wake event posted");
 }
 @end
 
@@ -511,7 +461,6 @@ int authenticateTouchID(const char *reason, const char *refsText,
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
         BOOL showWindow = (refsText != NULL && refsText[0] != '\0');
-        dbglog("authenticateTouchID: start (window=%d)", showWindow);
 
         if (!showWindow) {
             LAContext *context = [[LAContext alloc] init];
@@ -525,13 +474,10 @@ int authenticateTouchID(const char *reason, const char *refsText,
             [context evaluatePolicy:policy
                     localizedReason:reasonStr
                               reply:^(BOOL result, NSError *authError) {
-                dbglog("reply fired (no-window): success=%d err=%s", result,
-                    authError ? authError.description.UTF8String : "none");
                 success = result;
                 dispatch_semaphore_signal(sema);
             }];
             dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-            dbglog("authenticateTouchID: returning %d (no-window)", success ? 0 : 1);
             return success ? 0 : 1;
         }
 
@@ -546,8 +492,6 @@ int authenticateTouchID(const char *reason, const char *refsText,
         delegate.payloadJSON = [NSString stringWithUTF8String:refsText];
         [NSApp setDelegate:delegate];
         [NSApp run];
-        dbglog("authenticateTouchID: NSApp run returned, returning %d",
-            delegate.success ? 0 : 1);
 
         // Drop back out of the Dock — otherwise an "opcli" icon lingers for
         // as long as the process lives (the whole child run, under `opcli run`).
@@ -562,8 +506,6 @@ int authenticateTouchID(const char *reason, const char *refsText,
         // capped at 500ms.
         {
             pid_t me = getpid();
-            int passes = 0;
-            BOOL clear = NO;
             CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.5;
             for (;;) {
                 int mine = 0;
@@ -576,13 +518,10 @@ int authenticateTouchID(const char *reason, const char *refsText,
                     }
                     CFRelease(list);
                 }
-                if (mine == 0) { clear = YES; break; }
-                if (CFAbsoluteTimeGetCurrent() >= deadline) break;
-                passes++;
+                if (mine == 0 || CFAbsoluteTimeGetCurrent() >= deadline) break;
                 [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                          beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
             }
-            dbglog("post-run window flush: passes=%d clear=%d", passes, clear);
         }
 
         return delegate.success ? 0 : 1;
