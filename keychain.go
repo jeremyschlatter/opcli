@@ -67,7 +67,8 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 #pragma clang diagnostic pop
 
 // Defined in touchid.m, linked via libtouchid.a
-extern int authenticateTouchID(const char *reason);
+extern int authenticateTouchID(const char *reason, const char *refsText,
+                               const void *iconPNG, int iconPNGLen);
 
 // Add or update a keychain item with app-only access.
 //
@@ -206,11 +207,15 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -483,15 +488,200 @@ func SetDefaultAccount(accountUUID string) error {
 	return saveCredentialStore(store)
 }
 
+// dockIconPNG is shown in the Dock while the authorization window is up.
+//
+//go:embed assets/logo.png
+var dockIconPNG []byte
+
 // AuthenticateBiometric prompts for Touch ID or password using LAContext.
-func AuthenticateBiometric(reason string) error {
+// When refs is non-empty, a context window is shown alongside the system
+// TouchID dialog listing the op:// references being authenticated for.
+func AuthenticateBiometric(reason string, refs []string) error {
 	cReason := C.CString(reason)
 	defer C.free(unsafe.Pointer(cReason))
 
-	if C.authenticateTouchID(cReason) != 0 {
+	refsText := formatBiometricRefs(refs)
+	cRefs := C.CString(refsText)
+	defer C.free(unsafe.Pointer(cRefs))
+
+	dbglog("AuthenticateBiometric: calling authenticateTouchID (%d refs)", len(refs))
+	rc := C.authenticateTouchID(cReason, cRefs,
+		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
+	dbglog("AuthenticateBiometric: authenticateTouchID returned %d", rc)
+	if rc != 0 {
 		return fmt.Errorf("authentication failed or cancelled")
 	}
 	return nil
+}
+
+// formatBiometricRefs groups refs by vault ("[account:]vault") and emits a
+// JSON payload that the ObjC side (touchid.m) consumes to render the
+// authorization window. Returns "" when refs is empty (suppresses the
+// window entirely).
+//
+// Input refs look like "op://[account:]vault/item/[section/]field". We split
+// on the first '/' after "op://" to separate "[account:]vault" (the group
+// key) from the rest (the display string within the group). Refs that don't
+// start with "op://" fall into a single empty-key group — shouldn't happen
+// but we're defensive.
+//
+// JSON shape:
+//
+//	{"command":"claude deploy.sh","tty":"ttys003","groups":[
+//	  {"vault":"Employee","refs":["Item A/field", ...]}, ...
+//	]}
+func formatBiometricRefs(refs []string) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	type group struct {
+		Vault string   `json:"vault"`
+		Refs  []string `json:"refs"`
+	}
+	byVault := make(map[string]*group)
+	seen := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		vault, display := splitVaultAndDisplay(r)
+		g, ok := byVault[vault]
+		if !ok {
+			g = &group{Vault: vault}
+			byVault[vault] = g
+		}
+		g.Refs = append(g.Refs, display)
+	}
+	// Deterministic order: vaults sorted, refs within each vault sorted.
+	groups := make([]*group, 0, len(byVault))
+	for _, g := range byVault {
+		sort.Strings(g.Refs)
+		groups = append(groups, g)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Vault < groups[j].Vault })
+	payload := struct {
+		Command string   `json:"command"`
+		TTY     string   `json:"tty"`
+		Groups  []*group `json:"groups"`
+	}{
+		Command: describeInvokingCommand(),
+		TTY:     shortTTYName(),
+		Groups:  groups,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// splitVaultAndDisplay separates an op:// ref into its "[account:]vault"
+// group key and the remainder used as the in-group display string.
+func splitVaultAndDisplay(ref string) (vault, display string) {
+	path := strings.TrimPrefix(ref, "op://")
+	slash := strings.Index(path, "/")
+	if slash < 0 {
+		return path, ""
+	}
+	return path[:slash], path[slash+1:]
+}
+
+// describeInvokingCommand walks up the process tree from our parent and
+// returns a display string for the first non-shell, non-opcli ancestor —
+// e.g. when a coding agent invokes `opcli read …` through a shell, we want
+// to surface the agent's name ("claude deploy.sh"), not the intermediate
+// `sh -c …` or the outer login shell.
+//
+// The returned string basenames the first token (so "/usr/local/bin/claude"
+// becomes "claude") and preserves any trailing args. Returns "" when only
+// shells are found above us — e.g. when opcli is run directly at a prompt,
+// there's no invoking command to surface.
+func describeInvokingCommand() string {
+	pid := os.Getppid()
+	for i := 0; i < 16 && pid > 1; i++ {
+		cmd, ppid, ok := psLookup(pid)
+		if !ok {
+			return ""
+		}
+		name := baseCommandName(cmd)
+		if !isShellCommand(name) && !isOpcliCommand(name) {
+			return displayCommand(cmd)
+		}
+		pid = ppid
+	}
+	return ""
+}
+
+// displayCommand normalizes a full command line for display: basename the
+// first token (the executable path) and keep the rest of argv as-is.
+func displayCommand(cmd string) string {
+	cmd = strings.TrimPrefix(cmd, "-")
+	first, rest := cmd, ""
+	if sp := strings.IndexByte(cmd, ' '); sp >= 0 {
+		first, rest = cmd[:sp], cmd[sp:]
+	}
+	if slash := strings.LastIndexByte(first, '/'); slash >= 0 {
+		first = first[slash+1:]
+	}
+	return first + rest
+}
+
+// psLookup returns (command, ppid) for pid via `ps`. ok=false on failure.
+func psLookup(pid int) (string, int, bool) {
+	out, err := exec.Command("ps", "-o", "ppid=,command=", "-p", fmt.Sprintf("%d", pid)).Output()
+	if err != nil {
+		return "", 0, false
+	}
+	line := strings.TrimSpace(string(out))
+	sp := strings.IndexByte(line, ' ')
+	if sp < 0 {
+		return "", 0, false
+	}
+	ppid, err := strconv.Atoi(line[:sp])
+	if err != nil {
+		return "", 0, false
+	}
+	cmd := strings.TrimSpace(line[sp+1:])
+	return cmd, ppid, true
+}
+
+// baseCommandName returns the basename of the first token of a command line,
+// with any leading '-' stripped (login shells come through as "-zsh" etc.).
+func baseCommandName(cmd string) string {
+	first := cmd
+	if sp := strings.IndexByte(first, ' '); sp >= 0 {
+		first = first[:sp]
+	}
+	first = strings.TrimPrefix(first, "-")
+	if slash := strings.LastIndexByte(first, '/'); slash >= 0 {
+		first = first[slash+1:]
+	}
+	return first
+}
+
+func isShellCommand(name string) bool {
+	switch name {
+	case "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "login":
+		return true
+	}
+	return false
+}
+
+func isOpcliCommand(name string) bool {
+	return name == "opcli" || name == "opcli-test"
+}
+
+// shortTTYName returns the TTY basename (e.g. "ttys003") for display in the
+// TouchID window. Falls back to "" when no TTY is attached.
+func shortTTYName() string {
+	if p := currentTTYPath(); p != "" {
+		return strings.TrimPrefix(p, "/dev/")
+	}
+	if p := findAncestorTTY(); p != "" {
+		return strings.TrimPrefix(p, "/dev/")
+	}
+	return ""
 }
 
 // HasStoredCredentials checks if credentials exist for the account.

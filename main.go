@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,15 @@ import (
 
 	"golang.org/x/term"
 )
+
+// AppKit requires GUI work to happen on pthread_main_np() — the process's
+// initial OS thread. Go's main goroutine starts on that thread but the
+// scheduler is free to migrate it at any blocking point. Locking the main
+// goroutine to its starting thread keeps our cgo call into AppKit (from
+// authenticateTouchID) on the right thread; without this lock we see
+// intermittent SIGTRAPs inside `[NSApp run]` when the goroutine happens to
+// have migrated to a non-main thread by the time we call into Cocoa.
+func init() { runtime.LockOSThread() }
 
 // Timing instrumentation (enabled via OPCLI_TIMING=1)
 var timingEnabled = os.Getenv("OPCLI_TIMING") != ""
@@ -453,7 +463,9 @@ func cmdSignout(accountFlag string) error {
 }
 
 // getCredentials gets the account password for an account, using session-based auth if available.
-func getCredentials(accountUUID string) (password string, err error) {
+// pendingRefs lists the op:// references driving this authentication; they are
+// displayed in a context window shown alongside the TouchID prompt.
+func getCredentials(accountUUID string, pendingRefs []string) (password string, err error) {
 	// Check for existing valid session
 	session, _ := GetValidSession(accountUUID)
 
@@ -464,7 +476,7 @@ func getCredentials(accountUUID string) (password string, err error) {
 
 	if session == nil {
 		// No valid session - require biometric auth
-		if err := AuthenticateBiometric("access your 1Password credentials"); err != nil {
+		if err := AuthenticateBiometric("access your 1Password credentials", pendingRefs); err != nil {
 			return "", fmt.Errorf("authentication failed: %w", err)
 		}
 
@@ -496,6 +508,7 @@ type AccountKeychains struct {
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
+	pendingRefs    []string // op:// refs to show in the TouchID context window
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
@@ -568,7 +581,16 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
 	}
 
-	password, err := getCredentials(uuid)
+	// Pass pending refs only when auth will actually be prompted (no valid
+	// session). Once consumed, clear them so a second account lookup in the
+	// same command doesn't reuse a stale list.
+	var refsForAuth []string
+	if session, _ := GetValidSession(uuid); session == nil {
+		refsForAuth = aks.pendingRefs
+		aks.pendingRefs = nil
+	}
+
+	password, err := getCredentials(uuid, refsForAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -973,6 +995,8 @@ func cmdRead(uri string, accountFlag string) error {
 		return err
 	}
 	defer aks.Close()
+
+	aks.pendingRefs = []string{uri}
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {
@@ -1391,6 +1415,10 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	defer aks.Close()
 
+	for uri := range uris {
+		aks.pendingRefs = append(aks.pendingRefs, uri)
+	}
+
 	// Resolve all secrets
 	secrets := make(map[string]string)
 	for uri := range uris {
@@ -1514,6 +1542,16 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			return 0, err
 		}
 
+		for _, uri := range secretRefs {
+			aks.pendingRefs = append(aks.pendingRefs, uri)
+		}
+		if argsHaveRefs {
+			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
+			for _, arg := range cmdArgs {
+				aks.pendingRefs = append(aks.pendingRefs, opRefPattern.FindAllString(arg, -1)...)
+			}
+		}
+
 		for name, uri := range secretRefs {
 			value, err := resolveRef(aks, uri, nil)
 			if err != nil {
@@ -1562,6 +1600,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		dbglog("run: exec'ing into child (tui): %s", cmdArgs[0])
 		return 0, syscall.Exec(binary, cmdArgs, finalEnv)
 	}
 
@@ -1582,9 +1621,11 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 		defer stderrMask.Close()
 	}
 
+	dbglog("run: starting child: %s", cmdArgs[0])
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
+	dbglog("run: child started (pid=%d)", cmd.Process.Pid)
 
 	// Catch signals and forward them to the child. This prevents Go's
 	// runtime from killing us before the child finishes its cleanup.
@@ -1597,6 +1638,7 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 	}()
 
 	err := cmd.Wait()
+	dbglog("run: child exited (err=%v)", err)
 	signal.Stop(sigCh)
 	close(sigCh)
 
