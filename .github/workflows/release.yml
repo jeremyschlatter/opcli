@@ -62,14 +62,17 @@ jobs:
 
       - name: Create release archive
         run: |
-          ARCH=$(uname -m)
-          tar -czvf opcli-${{ github.ref_name }}-darwin-${ARCH}.tar.gz opcli
-          echo "ARCHIVE=opcli-${{ github.ref_name }}-darwin-${ARCH}.tar.gz" >> $GITHUB_ENV
+          ARCHIVE=opcli-${{ github.ref_name }}-darwin-$(uname -m).tar.gz
+          tar -czvf $ARCHIVE opcli
+          echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
+          # SRI hash for pkgs/opcli/package.nix in my nix config repo.
+          echo "SRI_HASH=sha256-$(openssl dgst -sha256 -binary $ARCHIVE | base64)" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARCHIVE }}
+          body: "nix SRI hash: `${{ env.SRI_HASH }}`"
           generate_release_notes: true
           # Hyphenated tags (eg v0.13.1-pre1) are pre-releases: hidden from
           # /releases/latest so regular users don't pick them up.

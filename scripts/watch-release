@@ -1,0 +1,13 @@
+#!/bin/sh
+# Watch the release build for a tag: polls until the run appears (gh run list
+# lags the tag push by a few seconds), then attaches gh run watch.
+#
+#   scripts/watch-release [tag]   (default: most recent local tag)
+set -e
+tag=${1:-$(git describe --tags --abbrev=0)}
+while true; do
+  id=$(gh run list --workflow=release.yml --branch "$tag" --limit 1 --json databaseId -q '.[0].databaseId')
+  [ -n "$id" ] && break
+  sleep 2
+done
+exec gh run watch "$id" --exit-status
