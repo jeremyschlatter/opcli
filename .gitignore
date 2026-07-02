@@ -9,6 +9,7 @@ obfuscation.go
 opcli-test
 
 # Local files
+CLAUDE.local.md
 .claude/
 !.claude/settings.json
 .beads/
