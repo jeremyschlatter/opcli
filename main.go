@@ -952,7 +952,7 @@ func (vk *AccountKeychain) findVaultByName(vaultName string, displayOnly bool, t
 
 	// Find match
 	for _, r := range decrypted {
-		if r.uuid != "" && (strings.EqualFold(r.displayName, vaultName) || !displayOnly && strings.EqualFold(r.rawName, vaultName)) {
+		if r.uuid != "" && (r.displayName == vaultName || !displayOnly && r.rawName == vaultName) {
 			return r.uuid, nil
 		}
 	}
@@ -976,7 +976,7 @@ func (vk *AccountKeychain) findItemByName(vaultUUID, itemName string, t *timer) 
 			continue
 		}
 
-		if strings.EqualFold(overview.Title, itemName) || items[i].UUID == itemName {
+		if overview.Title == itemName || items[i].UUID == itemName {
 			if t != nil {
 				t.mark(fmt.Sprintf("    decrypt %d item overviews", i+1))
 			}
@@ -1110,20 +1110,18 @@ func vaultDisplayName(vaultType, accountType, storedName string) string {
 	return storedName
 }
 
-// fieldMatches checks if a field matches the given name (case-insensitive).
+// fieldMatches checks if a field matches the given name (exact match).
 func fieldMatches(f *Field, name string) bool {
-	lower := strings.ToLower(name)
-	return strings.ToLower(f.FieldLabel()) == lower ||
-		strings.ToLower(f.FieldID()) == lower ||
-		strings.ToLower(f.Designation) == lower ||
-		strings.ToLower(f.Name) == lower ||
-		strings.ToLower(f.ID) == lower
+	return f.FieldLabel() == name ||
+		f.FieldID() == name ||
+		f.Designation == name ||
+		f.Name == name ||
+		f.ID == name
 }
 
-// sectionMatches checks if a section matches the given name (case-insensitive).
+// sectionMatches checks if a section matches the given name (exact match).
 func sectionMatches(s *Section, name string) bool {
-	lower := strings.ToLower(name)
-	return strings.ToLower(s.Name) == lower || strings.ToLower(s.Title) == lower
+	return s.Name == name || s.Title == name
 }
 
 // findField searches for a field in the decrypted item.
@@ -1184,13 +1182,6 @@ func findField(item *DecryptedItem, sectionName, fieldName string) (string, erro
 	if len(matches) == 0 && len(item.Fields) == 0 {
 		if v, ok := item.Extras[fieldName]; ok {
 			matches = append(matches, match{value: v, section: ""})
-		} else {
-			lower := strings.ToLower(fieldName)
-			for k, v := range item.Extras {
-				if strings.ToLower(k) == lower {
-					matches = append(matches, match{value: v, section: ""})
-				}
-			}
 		}
 	}
 

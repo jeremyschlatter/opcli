@@ -61,7 +61,15 @@ accounts:
                         itemUuid: "fake-item-uuid-5678"
           - title: Test Password Item
             details_json: '{"password": "my-top-level-password"}'
-      - name: Work
+          - title: Test Case Sensitive
+            fields:
+              - name: token
+                type: string
+                value: lowercase-value
+              - name: TOKEN
+                type: string
+                value: UPPERCASE-VALUE
+      - name: work
         type: U
         items:
           - title: work

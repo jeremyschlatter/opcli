@@ -47,6 +47,30 @@ read:
     errSuffix: "Error: field not found: nosuchfield\n"
     code: 1
 
+  # Refs are exact-match: fields differing only by case are distinct
+  - name: case-sensitive field match (lowercase)
+    args: [read, "op://Private/Test Case Sensitive/token"]
+    out: "lowercase-value\n"
+
+  - name: case-sensitive field match (uppercase)
+    args: [read, "op://Private/Test Case Sensitive/TOKEN"]
+    out: "UPPERCASE-VALUE\n"
+
+  - name: wrong-case field not found
+    args: [read, "op://Private/Test Case Sensitive/ToKeN"]
+    errSuffix: "Error: field not found: ToKeN\n"
+    code: 1
+
+  - name: wrong-case vault not found
+    args: [read, "op://private/Test Login/password"]
+    errSuffix: "Error: vault not found: private\n"
+    code: 1
+
+  - name: wrong-case item not found
+    args: [read, "op://Private/test login/password"]
+    errSuffix: "Error: item not found: test login\n"
+    code: 1
+
   # Account-qualified refs (colon syntax: account:vault/item/field)
   - name: account-qualified ref via shorthand
     args: [read, "op://work:Shared/Work Login/password"]
@@ -197,7 +221,7 @@ list:
     out: |
       Vaults:
         Private (vault-Private-uuid)
-        Work (vault-Work-uuid)
+        work (vault-work-uuid)
 
 run:
   # Basic functionality (use --no-masking to verify resolved values)
