@@ -443,11 +443,10 @@ func resolveAccountFromStore(store *CredentialStore, identifier string) (*Stored
 	}
 
 	// Check shorthand, email, or URL
-	identifier = strings.ToLower(identifier)
 	for uuid, acct := range store.Accounts {
-		if strings.ToLower(acct.Shorthand) == identifier ||
-			strings.ToLower(acct.Email) == identifier ||
-			strings.Contains(strings.ToLower(acct.URL), identifier) {
+		if acct.Shorthand == identifier ||
+			acct.Email == identifier ||
+			strings.Contains(acct.URL, identifier) {
 			return acct, uuid, nil
 		}
 	}

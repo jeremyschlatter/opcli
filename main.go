@@ -290,12 +290,11 @@ func selectDBAccount(db *sql.DB, accountFlag string) (*AccountInfo, error) {
 	}
 
 	// Match by UUID, email, or URL
-	lower := strings.ToLower(accountFlag)
 	for i := range accounts {
 		a := &accounts[i]
 		if a.AccountUUID == accountFlag ||
-			strings.ToLower(a.Email) == lower ||
-			strings.Contains(strings.ToLower(a.URL), lower) {
+			a.Email == accountFlag ||
+			strings.Contains(a.URL, accountFlag) {
 			return a, nil
 		}
 		// Also check shorthand from stored credentials

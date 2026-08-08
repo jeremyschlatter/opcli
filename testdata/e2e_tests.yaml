@@ -71,6 +71,11 @@ read:
     errSuffix: "Error: item not found: test login\n"
     code: 1
 
+  - name: wrong-case account not found
+    args: [read, "op://WORK:Shared/Work Login/password"]
+    errSuffix: "account not found: WORK\n"
+    code: 1
+
   # Account-qualified refs (colon syntax: account:vault/item/field)
   - name: account-qualified ref via shorthand
     args: [read, "op://work:Shared/Work Login/password"]
