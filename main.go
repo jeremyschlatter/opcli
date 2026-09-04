@@ -174,6 +174,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "ssh-sign":
+		if err := cmdSSHSign(args[2:], accountFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "signin":
 		if err := cmdSignin(accountFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -222,6 +227,8 @@ func printUsage() {
 	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
 	fmt.Println("  opcli run [--env-file=<file>]... [--tui] -- <command>")
 	fmt.Println("                                       - Run command with secrets as env vars")
+	fmt.Println("  opcli ssh-sign <op://vault/item/field> -Y sign -n <namespace> -f <pubkey file> <file>")
+	fmt.Println("                                       - Sign <file> with an SSH key (ssh-keygen -Y sign compatible)")
 	fmt.Println("  opcli account list                   - List all accounts")
 	fmt.Println("  opcli account forget [<acct>]        - Remove an account")
 	fmt.Println()

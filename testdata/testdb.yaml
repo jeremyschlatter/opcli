@@ -39,6 +39,18 @@ accounts:
                   - name: port
                     type: string
                     value: "8080"
+          - title: Test SSH Key
+            fields:
+              - name: private_key
+                type: sshKey
+                value: |
+                  -----BEGIN OPENSSH PRIVATE KEY-----
+                  b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+                  QyNTUxOQAAACDFg1zlUq/vvd20hA5PVA1pNPPQtcml6FasaSoDwC2SoAAAAJAnE4hKJxOI
+                  SgAAAAtzc2gtZWQyNTUxOQAAACDFg1zlUq/vvd20hA5PVA1pNPPQtcml6FasaSoDwC2SoA
+                  AAAED5kOqj5J8GutA3grUwD7n63JvgYB2jF73KE7BirlBUj8WDXOVSr++93bSEDk9UDWk0
+                  89C1yaXoVqxpKgPALZKgAAAACm9wY2xpLXRlc3QBAgM=
+                  -----END OPENSSH PRIVATE KEY-----
           - title: Test Empty
             fields:
               - name: empty

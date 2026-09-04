@@ -65,6 +65,34 @@ opcli get "op://VaultName/ItemName"
 opcli signout
 ```
 
+### Git commit signing
+
+`opcli ssh-sign` signs a file with an SSH key stored in 1Password, using the
+same arguments and output format as `ssh-keygen -Y sign`. This lets it stand in
+for the 1Password SSH agent as git's signing program:
+
+```bash
+# ~/bin/git-sign (git runs this as: git-sign -Y sign -n git -f <pubkey> [-U] <file>)
+#!/bin/sh
+exec opcli ssh-sign "op://Private/My SSH Key/private_key" "$@"
+```
+
+```ini
+# ~/.gitconfig
+[gpg]
+    format = ssh
+[gpg "ssh"]
+    program = ~/bin/git-sign
+[user]
+    signingkey = ssh-ed25519 AAAA...
+[commit]
+    gpgsign = true
+```
+
+Unlike the 1Password agent, the Touch ID prompt belongs to the `opcli` process,
+so killing it (say, with `timeout`) takes the prompt down with it. Sessions
+apply as usual: one approval covers 10 minutes of commits from that terminal.
+
 ### Secret reference format
 
 ```

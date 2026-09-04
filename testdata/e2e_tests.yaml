@@ -220,6 +220,39 @@ inject:
         content: test
         mode: 0644
 
+ssh-sign:
+  # Expected signature was produced by `ssh-keygen -Y sign -n git -f testkey msg`
+  # with the same key. Ed25519 signatures are deterministic, so they must match.
+  - name: sign a file (matches ssh-keygen output)
+    args: [ssh-sign, "op://Private/Test SSH Key/private_key", -Y, sign, -n, git, -f, testkey.pub, -U, msg]
+    files:
+      testkey.pub: |
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWDXOVSr++93bSEDk9UDWk089C1yaXoVqxpKgPALZKg opcli-test
+      msg: "hello sshsig\n"
+    outputs:
+      msg.sig:
+        content: |
+          -----BEGIN SSH SIGNATURE-----
+          U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgxYNc5VKv773dtIQOT1QNaTTz0L
+          XJpehWrGkqA8AtkqAAAAADZ2l0AAAAAAAAAAZzaGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5
+          AAAAQEYXIinRtmEyu4L8qoHbQ5ppy0XczqEDxkyCrjbA1W7adNNhokCTAV0SREdzz9a24V
+          59285mpff5VzO+or33MQo=
+          -----END SSH SIGNATURE-----
+        mode: 0644
+
+  - name: public key mismatch
+    args: [ssh-sign, "op://Private/Test SSH Key/private_key", -Y, sign, -n, git, -f, other.pub, msg]
+    files:
+      other.pub: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINJHJoYIFGXlBHxC0w09/NhyWSZ3aG3+XBv1qWrtPGih\n"
+      msg: "hello sshsig\n"
+    errSuffix: "Error: public key in other.pub does not match the private key in op://Private/Test SSH Key/private_key\n"
+    code: 1
+
+  - name: bad arguments
+    args: [ssh-sign, "op://Private/Test SSH Key/private_key", -Y, verify, msg]
+    errPrefix: "Error: usage: opcli ssh-sign"
+    code: 1
+
 list:
   - name: list vaults
     args: [list]
