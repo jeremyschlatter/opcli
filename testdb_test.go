@@ -445,7 +445,7 @@ func createSchema(db *sql.DB) error {
 			value TEXT NOT NULL
 		);
 
-		INSERT INTO config (name, value) VALUES ('version', '61');
+		INSERT INTO config (name, value) VALUES ('version', '62');
 
 		CREATE TABLE accounts (
 			account_uuid TEXT PRIMARY KEY NOT NULL,
@@ -489,6 +489,14 @@ func createSchema(db *sql.DB) error {
 			data BLOB NOT NULL,
 			PRIMARY KEY (key_name, type)
 		);
+
+		CREATE INDEX items_rejection_reason ON items(rejection_reason) WHERE rejection_reason <> 0;
+		CREATE INDEX items_local_edit_count ON items(local_edit_count) WHERE local_edit_count <> 0;
+		CREATE INDEX items_version ON items(version) WHERE local_edit_count <> 0;
+		CREATE INDEX items_local_edit_count_state ON items(1) WHERE local_edit_count = 0 AND data ->> '$.state' = 2;
+		CREATE INDEX objects_associated_account_uuid_vault_uuid_item_uuid_type_key_name
+			ON objects_associated(account_uuid, vault_uuid, item_uuid, type, key_name);
+		CREATE INDEX objects_unassociated_type ON objects_unassociated(type);
 	`
 	_, err := db.Exec(schema)
 	return err

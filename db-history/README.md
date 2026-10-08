@@ -17,7 +17,7 @@ The SQL migration statements are embedded as string literals in the Rust core li
 
 1Password 8 maintains two SQLite databases:
 
-### `1password.sqlite` (core_db) — versions 1–60
+### `1password.sqlite` (core_db) — versions 1–62
 
 The main database. Stores accounts, vaults, encrypted items, and various application state. Schema version tracked in `config` table (`name='version'`).
 
@@ -94,6 +94,7 @@ Files: `migrations/resources_NNN.sql`
 | 59 | Clear autofill data |
 | 60 | Migrate keysets from `account_objects` into `objects_associated` (Rust-based) |
 | 61 | Major restructuring: integer IDs → UUID PKs, `account_objects` → `vaults`, `item_overviews`+`item_details` → `items`, un-stringify encrypted data in vault JSON (Rust-based) |
+| 62 | Add indexes: `items_local_edit_count_state`, `objects_associated_account_uuid_vault_uuid_item_uuid_type_key_name`, `objects_unassociated_type` |
 
 ### Resources DB
 
@@ -106,7 +107,7 @@ Files: `migrations/resources_NNN.sql`
 
 The dominant trend across v27–v60 is **table consolidation**: specialized tables (ssh_pubkeys, snippet_shortcuts, item_usage, collection_map, feature_flags, account_policies, developer_activity_log, etc.) are progressively migrated into the generic `objects_associated` / `objects_unassociated` key-value tables, distinguished by a `type` integer column.
 
-### Final schema (v61)
+### Final schema (v61–v62)
 
 Only 6 tables remain:
 - `accounts` — account metadata (account_uuid TEXT PK)
