@@ -51,6 +51,11 @@ const (
 	required     = "required"
 )
 
+// migratedFromVersion is the on-disk schema version if openDB had to migrate
+// from a schema older than v60, else 0. opcli was first built against v60;
+// migrations before that are reconstructions tested against little real data.
+var migratedFromVersion int
+
 // openDB opens the 1Password database in read-only mode, optionally
 // creating a versioned backup if OPCLI_AUTO_BACKUP_1PASSWORD_DB is set.
 // If the DB has an older schema, it makes an in-memory copy of the DB
@@ -93,6 +98,9 @@ func openDB() (*sql.DB, error) {
 	}
 
 	// Copy to in-memory DB and apply migrations.
+	if version < 60 {
+		migratedFromVersion = version
+	}
 	t0 := time.Now()
 	memDB, err := backupToMemory(db)
 	if err != nil {

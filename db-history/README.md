@@ -58,7 +58,7 @@ Files: `migrations/resources_NNN.sql`
 | 23 | Restructure `objects` table: add `type`, `associated_item`, `associated_account` columns |
 | 24 | Add `synced_at` to `item_usage` |
 | 25 | Add FK cascade on `item_usage` → accounts |
-| 26 | Data migration: update sign-in provider format in account data (Rust-based) |
+| 26 | Data migration: move top-level `secret_key` + `enc_unlock_key` in account data into a `sign_in_provider` object (Rust-based; SQL reconstructed from v25/v60 backups) |
 | 27 | Create `ssh_pubkeys` table, migrate from objects |
 | 28 | Add `config_order` to `ssh_pubkeys` |
 | 29 | Create `feature_flags` table, migrate from objects |

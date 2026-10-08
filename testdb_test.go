@@ -226,16 +226,22 @@ func insertAccountAndKeyset(db *sql.DB, acctSpec testDBAccountYAML, fromV1 bool,
 		return nil, nil, fmt.Errorf("failed to generate symmetric key: %w", err)
 	}
 
-	accountJSON, _ := json.Marshal(map[string]interface{}{
+	account := map[string]interface{}{
 		"account_uuid": creds.AccountUUID,
 		"user_email":   creds.Email,
 		"user_name":    creds.UserName,
 		"sign_in_url":  creds.SignInURL,
-		"sign_in_provider": map[string]interface{}{
+	}
+	if fromV1 {
+		// pre-v26 format: secret key at the top level
+		account["secret_key"] = obfuscateSecretKey(creds.SecretKey)
+	} else {
+		account["sign_in_provider"] = map[string]interface{}{
 			"type":       "sk",
 			"secret_key": obfuscateSecretKey(creds.SecretKey),
-		},
-	})
+		}
+	}
+	accountJSON, _ := json.Marshal(account)
 
 	symKeyJWK := createSymmetricKeyJWK(symKey, keysetUUID)
 	encSymKey, err := createPBES2EncryptedData(symKeyJWK, creds.SecretKey, creds.Password, creds.Email)

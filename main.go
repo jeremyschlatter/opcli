@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"opcli/migrations"
 )
 
 // AppKit requires GUI work to happen on pthread_main_np() — the process's
@@ -87,6 +89,16 @@ var testCommands map[string]func() error
 // Version is set at build time via -ldflags
 var Version = "dev"
 
+// fatal prints err and exits. If the DB was migrated in memory from a
+// pre-v60 schema, it says so: those migrations are best-effort and may be the cause.
+func fatal(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if migratedFromVersion != 0 {
+		fmt.Fprintf(os.Stderr, "Note: this 1Password database is at schema v%d and was migrated to v%d in memory. Support for old schemas is best-effort, so this error may come from an incomplete migration.\n", migratedFromVersion, len(migrations.All)-1)
+	}
+	os.Exit(1)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -119,8 +131,7 @@ func main() {
 	if testCommands != nil {
 		if fn, ok := testCommands[cmd]; ok {
 			if err := fn(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				fatal(err)
 			}
 			return
 		}
@@ -135,8 +146,7 @@ func main() {
 		switch args[2] {
 		case "list":
 			if err := cmdAccountList(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				fatal(err)
 			}
 		case "forget":
 			acct := accountFlag
@@ -144,8 +154,7 @@ func main() {
 				acct = args[3]
 			}
 			if err := cmdAccountForget(acct); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				fatal(err)
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown account subcommand: %s\n", args[2])
@@ -157,13 +166,11 @@ func main() {
 			os.Exit(1)
 		}
 		if err := cmdRead(args[2], accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "list":
 		if err := cmdList(accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "get":
 		if len(args) < 3 {
@@ -171,40 +178,33 @@ func main() {
 			os.Exit(1)
 		}
 		if err := cmdGet(args[2], accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "ssh-sign":
 		if err := cmdSSHSign(args[2:], accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "signin":
 		if err := cmdSignin(accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "signout":
 		if err := cmdSignout(accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "inject":
 		if err := cmdInject(args[2:], accountFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "run":
 		code, err := cmdRun(args[2:], accountFlag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 		os.Exit(code)
 	case "versioned-backup-poll":
 		if err := cmdVersionedBackupPoll(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal(err)
 		}
 	case "version", "--version", "-v":
 		fmt.Printf("opcli %s\n", Version)
@@ -979,7 +979,7 @@ func (vk *AccountKeychain) findItemByName(vaultUUID, itemName string, t *timer) 
 	for i := range items {
 		overview, err := vk.decryptOverview(vaultUUID, &items[i].EncOverview)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("failed to decrypt overview of item %s: %w", items[i].UUID, err)
 		}
 
 		if overview.Title == itemName || items[i].UUID == itemName {

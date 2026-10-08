@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -308,6 +309,8 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 					}
 
 					stdout, stderr, code := env.runCLI(workDir, tc.Stdin, tc.Env, tc.Args...)
+					// Errors on a migrated DB carry an extra note; expectations are shared with the unmigrated run.
+					stderr = regexp.MustCompile(`(?m)^Note: this 1Password database is at schema.*\n`).ReplaceAllString(stderr, "")
 
 					if code != tc.Code {
 						t.Errorf("exit code: got %d, want %d\nstderr: %s", code, tc.Code, stderr)
