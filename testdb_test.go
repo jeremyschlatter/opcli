@@ -451,7 +451,7 @@ func createSchema(db *sql.DB) error {
 			value TEXT NOT NULL
 		);
 
-		INSERT INTO config (name, value) VALUES ('version', '62');
+		INSERT INTO config (name, value) VALUES ('version', '63');
 
 		CREATE TABLE accounts (
 			account_uuid TEXT PRIMARY KEY NOT NULL,
@@ -496,9 +496,8 @@ func createSchema(db *sql.DB) error {
 			PRIMARY KEY (key_name, type)
 		);
 
-		CREATE INDEX items_rejection_reason ON items(rejection_reason) WHERE rejection_reason <> 0;
-		CREATE INDEX items_local_edit_count ON items(local_edit_count) WHERE local_edit_count <> 0;
-		CREATE INDEX items_version ON items(version) WHERE local_edit_count <> 0;
+		CREATE INDEX items_rejection_reason ON items(account_uuid) WHERE rejection_reason != 0;
+		CREATE INDEX items_to_push ON items(account_uuid, vault_uuid, version) WHERE local_edit_count != 0 AND rejection_reason = 0;
 		CREATE INDEX items_local_edit_count_state ON items(1) WHERE local_edit_count = 0 AND data ->> '$.state' = 2;
 		CREATE INDEX objects_associated_account_uuid_vault_uuid_item_uuid_type_key_name
 			ON objects_associated(account_uuid, vault_uuid, item_uuid, type, key_name);
