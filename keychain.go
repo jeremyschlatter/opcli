@@ -210,6 +210,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -492,6 +493,13 @@ func SetDefaultAccount(accountUUID string) error {
 //go:embed assets/logo.png
 var dockIconPNG []byte
 
+// ErrAuthRefused means Touch ID (or its password fallback) didn't authenticate:
+// the user cancelled or failed, or macOS wouldn't show the prompt at all (for
+// example while the screen is locked). opcli exits with exitAuthRefused for it,
+// so callers can tell "nobody approved" from opcli being broken. git's signing
+// wrapper (_git-sign in Jeremy's dev env) commits unsigned on it.
+var ErrAuthRefused = errors.New("authentication failed or cancelled")
+
 // AuthenticateBiometric prompts for Touch ID or password using LAContext.
 // When refs is non-empty, a context window is shown alongside the system
 // TouchID dialog listing the op:// references being authenticated for.
@@ -506,7 +514,7 @@ func AuthenticateBiometric(reason string, refs []string) error {
 	rc := C.authenticateTouchID(cReason, cRefs,
 		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
 	if rc != 0 {
-		return fmt.Errorf("authentication failed or cancelled")
+		return ErrAuthRefused
 	}
 	return nil
 }

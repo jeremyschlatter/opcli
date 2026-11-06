@@ -398,10 +398,22 @@ func TestE2E_AutoAccountSessionCoversAll(t *testing.T) {
 	}
 }
 
+// With no cached session, a refused Touch ID must exit with exitAuthRefused,
+// not 1: git's signing wrapper commits unsigned on that code alone.
 func TestE2E_TouchIDFail(t *testing.T) {
-	// This test requires a fresh session (no cached auth) and TouchID to fail.
-	// Since our test setup creates a session via keychain storage, we'd need
-	// to delete the session first and then test with OPCLI_TEST_TOUCHID_FAIL=1.
-	// For now, skip this test.
-	t.Skip("TouchID failure test not yet implemented")
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+	os.Remove(filepath.Join(env.dataDir, "sessions.json"))
+
+	_, stderr, code := env.runCLI("", "", map[string]string{
+		"OP_ACCOUNT":              "my",
+		"OPCLI_TEST_SESSION_KEY":  "touchid-fail-test",
+		"OPCLI_TEST_TOUCHID_FAIL": "1",
+	}, "read", "op://Shared/Work Login/password")
+	if code != exitAuthRefused {
+		t.Errorf("expected exit code %d, got %d; stderr: %s", exitAuthRefused, code, stderr)
+	}
+	if !strings.Contains(stderr, "authentication failed or cancelled") {
+		t.Errorf("expected the auth failure message, got stderr: %s", stderr)
+	}
 }

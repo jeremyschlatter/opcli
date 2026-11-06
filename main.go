@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -89,12 +90,19 @@ var testCommands map[string]func() error
 // Version is set at build time via -ldflags
 var Version = "dev"
 
+// exitAuthRefused is the exit status when Touch ID didn't authenticate
+// (ErrAuthRefused). Every other error exits 1.
+const exitAuthRefused = 3
+
 // fatal prints err and exits. If the DB was migrated in memory from a
 // pre-v60 schema, it says so: those migrations are best-effort and may be the cause.
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 	if migratedFromVersion != 0 {
 		fmt.Fprintf(os.Stderr, "Note: this 1Password database is at schema v%d and was migrated to v%d in memory. Support for old schemas is best-effort, so this error may come from an incomplete migration.\n", migratedFromVersion, len(migrations.All)-1)
+	}
+	if errors.Is(err, ErrAuthRefused) {
+		os.Exit(exitAuthRefused)
 	}
 	os.Exit(1)
 }

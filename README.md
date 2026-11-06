@@ -93,6 +93,11 @@ Unlike the 1Password agent, the Touch ID prompt belongs to the `opcli` process,
 so killing it (say, with `timeout`) takes the prompt down with it. Sessions
 apply as usual: one approval covers 10 minutes of commits from that terminal.
 
+When Touch ID doesn't authenticate, because the prompt was cancelled or macOS
+wouldn't show it (for example while the screen is locked), every opcli command
+exits with status **3**. Any other error exits with 1. A wrapper can commit
+unsigned on 3 and still fail loudly when signing is actually broken.
+
 ### Secret reference format
 
 ```
