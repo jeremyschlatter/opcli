@@ -139,6 +139,12 @@ func getSessionKey() (string, error) {
 		return "", fmt.Errorf("no controlling terminal")
 	}
 
+	return sessionKeyForTTY(ttyPath)
+}
+
+// sessionKeyForTTY returns the session key of the terminal session currently
+// on the TTY device at ttyPath.
+func sessionKeyForTTY(ttyPath string) (string, error) {
 	// Get the TTY's creation/start time
 	var stat syscall.Stat_t
 	if err := syscall.Stat(ttyPath, &stat); err != nil {

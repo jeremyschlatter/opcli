@@ -127,7 +127,6 @@ Differences from `op`:
   the items holding it are listed first.
 - Configuration lives under `.opcli`, not `.op`. The format is op's, plus the
   field choices.
-- A session-scoped choice lasts 12 hours at most.
 - Not supported yet: plugins that take a choice of other plugins' credentials
   (`terraform`, `tofu`), one-time-password fields, and the cache that lets a
   plugin reuse temporary credentials between runs (both matter for `aws` with MFA).

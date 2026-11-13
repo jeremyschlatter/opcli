@@ -20,7 +20,6 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
-	"time"
 
 	"github.com/1Password/shell-plugins/sdk"
 	"github.com/1Password/shell-plugins/sdk/schema"
@@ -532,8 +531,8 @@ func pluginConfigPath(name, scope string) (string, error) {
 }
 
 // pluginConfigs returns the configs that apply to the executable `name` here
-// and now, highest precedence first: this terminal session, the nearest
-// enclosing directory with one, then the global default.
+// and now, highest precedence first: this terminal session, the enclosing
+// directories from the current one outward, then the global default.
 func pluginConfigs(name string) ([]foundPluginConfig, error) {
 	var found []foundPluginConfig
 	add := func(scope, path string) error {
@@ -559,16 +558,14 @@ func pluginConfigs(name string) ([]foundPluginConfig, error) {
 		return nil, err
 	}
 
-	// Session configs die with opcli's sessions (at most 12h). No terminal, no session scope.
+	// A session config lasts as long as its terminal. No terminal, no session scope.
 	if _, err := getSessionKey(); err == nil {
 		path, err := pluginConfigPath(name, pluginScopeSession)
 		if err != nil {
 			return nil, err
 		}
-		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < sessionAbsoluteMax {
-			if err := add(pluginScopeSession, path); err != nil {
-				return nil, err
-			}
+		if err := add(pluginScopeSession, path); err != nil {
+			return nil, err
 		}
 	}
 
@@ -580,12 +577,8 @@ func pluginConfigs(name string) ([]foundPluginConfig, error) {
 		path := filepath.Join(dir, ".opcli", "plugins", name+".json")
 		// (In the home directory, the directory config *is* the global one.)
 		if path != globalPath {
-			n := len(found)
 			if err := add(pluginScopeDirectory, path); err != nil {
 				return nil, err
-			}
-			if len(found) > n {
-				break
 			}
 		}
 		if dir == filepath.Dir(dir) {
@@ -727,7 +720,8 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 			return nil, err
 		}
 		defer aks.Close()
-		aks.pendingRefs = []string{"op://shell plugin/" + name}
+		// Shown beside the Touch ID prompt: unlike other commands, this one reads everything.
+		aks.pendingRefs = []string{"op://Full database access/every vault/every item"}
 
 		accounts := []string{aks.defaultAccount}
 		if accountFlag == "" && os.Getenv("OP_ACCOUNT") == "" && os.Getenv("OPCLI_AUTO_ACCOUNT") != "" {
@@ -907,15 +901,28 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 		return nil, err
 	}
 	if scopes[scope] == pluginScopeSession {
-		// Sweep up the configs of sessions that have ended.
-		stale, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(path)), "*", "*.json"))
+		// Sweep up the configs of terminal sessions that have ended.
+		live := map[string]bool{filepath.Base(filepath.Dir(path)): true}
+		ttys, err := filepath.Glob("/dev/ttys*")
 		if err != nil {
 			return nil, err
 		}
-		for _, f := range stale {
-			if info, err := os.Stat(f); err == nil && time.Since(info.ModTime()) > sessionAbsoluteMax {
-				os.Remove(f)
-				os.Remove(filepath.Dir(f)) // fails, harmlessly, unless now empty
+		for _, tty := range ttys {
+			key, err := sessionKeyForTTY(tty)
+			if err != nil {
+				return nil, err
+			}
+			live[key] = true
+		}
+		sessions, err := os.ReadDir(filepath.Dir(filepath.Dir(path)))
+		if err != nil {
+			return nil, err
+		}
+		for _, session := range sessions {
+			if !live[session.Name()] {
+				if err := os.RemoveAll(filepath.Join(filepath.Dir(filepath.Dir(path)), session.Name())); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
