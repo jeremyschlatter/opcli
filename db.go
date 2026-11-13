@@ -424,6 +424,31 @@ func getVaultByUUID(db *sql.DB, accountUUID, vaultUUID string) (*Vault, error) {
 	return &vault, nil
 }
 
+// getItem retrieves a non-trashed item by UUID.
+func getItem(db *sql.DB, accountUUID, vaultUUID, itemUUID string) (*Item, error) {
+	item := Item{UUID: itemUUID, VaultUUID: vaultUUID}
+	var overview, details []byte
+	t0 := time.Now()
+	err := db.QueryRow(`
+		SELECT json_extract(data, '$.category_uuid'), json_extract(data, '$.overview'), json_extract(data, '$.details') FROM items
+		WHERE account_uuid = ? AND vault_uuid = ? AND item_uuid = ?
+		AND json_extract(data, '$.state') = 0
+	`, accountUUID, vaultUUID, itemUUID).Scan(&item.TemplateUUID, &overview, &details)
+	logQueryTime("getItem", t0)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("item not found: %s", itemUUID)
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to query item: %w", err)
+	}
+	if err := json.Unmarshal(overview, &item.EncOverview); err != nil {
+		return nil, fmt.Errorf("failed to parse item overview: %w", err)
+	}
+	if err := json.Unmarshal(details, &item.EncDetails); err != nil {
+		return nil, fmt.Errorf("failed to parse item details: %w", err)
+	}
+	return &item, nil
+}
+
 // getItems retrieves all non-trashed items for a vault.
 func getItems(db *sql.DB, accountUUID, vaultUUID string) ([]Item, error) {
 	t0 := time.Now()

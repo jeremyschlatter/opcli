@@ -417,3 +417,89 @@ func TestE2E_TouchIDFail(t *testing.T) {
 		t.Errorf("expected the auth failure message, got stderr: %s", stderr)
 	}
 }
+
+// `plugin run` provisions the configured item's credential to the executable
+// the way the upstream shell plugin for it says to. (`plugin init`, which
+// writes the configs, is an interactive TUI: tested by hand.)
+func TestE2E_PluginRun(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+	vault := env.testDB.Vaults["Private"]
+
+	// Stand-ins for the real CLIs, reporting what they were given.
+	binDir := filepath.Join(env.tmpDir, "bin")
+	if err := os.Mkdir(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string]string{
+		"gh":    `echo "token=$GH_TOKEN args=$*"; exit 7`,
+		"mysql": `for last; do :; done; echo "args=${*%%=*}"; cat "${last#--defaults-file=}"; echo "${last#--defaults-file=}" >&2`,
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"+script+"\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extraEnv := map[string]string{"PATH": binDir + ":" + os.Getenv("PATH")}
+
+	writeConfig := func(dir, exe, plugin, credType, item string, fields string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		config := fmt.Sprintf(`{"account_id": %q, "entrypoint": [%q], "credentials": [{"plugin": %q, "credential_type": %q, "usage_id": %q, "vault_id": %q, "item_id": %q, "fields": %s}]}`,
+			env.testDB.AccountUUID, exe, plugin, credType, credType, vault.UUID, vault.Items[item].UUID, fields)
+		if err := os.WriteFile(filepath.Join(dir, exe+".json"), []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	globalDir := filepath.Join(env.dataDir, "plugins")
+	workDir := filepath.Join(env.tmpDir, "work")
+	if err := os.MkdirAll(filepath.Join(workDir, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) (string, string, int) {
+		return env.runCLI(dir, "", extraEnv, append([]string{"plugin", "run", "--"}, args...)...)
+	}
+
+	// Not configured: commands that need no credential still run; others fail (there's no terminal to ask in).
+	if out, stderr, code := run(workDir, "gh", "--version"); out != "token= args=--version\n" || code != 7 {
+		t.Errorf("unconfigured gh --version: out=%q stderr=%q code=%d", out, stderr, code)
+	}
+	if _, stderr, code := run(workDir, "gh", "api", "user"); code != 1 || !strings.Contains(stderr, "no credential configured for gh") {
+		t.Errorf("unconfigured gh api: stderr=%q code=%d", stderr, code)
+	}
+	if _, stderr, code := run(workDir, "nosuchcli"); code != 1 || !strings.Contains(stderr, `no shell plugin for "nosuchcli"`) {
+		t.Errorf("unknown executable: stderr=%q code=%d", stderr, code)
+	}
+
+	// Global config, with a field mapping (the item's field is "credential", the plugin wants "Token").
+	// The executable's exit code and its own --account flag pass through.
+	writeConfig(globalDir, "gh", "github", "personal_access_token", "Test API Key", `{"Token": "credential"}`)
+	if out, stderr, code := run(workDir, "gh", "api", "--account", "x"); out != "token=api-key-12345 args=api --account x\n" || code != 7 {
+		t.Errorf("gh with global config: out=%q stderr=%q code=%d", out, stderr, code)
+	}
+
+	// A directory config beats the global one, in subdirectories too.
+	writeConfig(filepath.Join(workDir, ".opcli", "plugins"), "gh", "github", "personal_access_token", "Test Login", `{"Token": "password"}`)
+	if out, stderr, code := run(filepath.Join(workDir, "sub"), "gh", "api"); out != "token=secret123 args=api\n" || code != 7 {
+		t.Errorf("gh with directory config: out=%q stderr=%q code=%d", out, stderr, code)
+	}
+
+	// A mapping to a field that's gone is an error, not a silent omission.
+	writeConfig(globalDir, "gh", "github", "personal_access_token", "Test API Key", `{"Token": "nosuchfield"}`)
+	if _, stderr, code := run(env.tmpDir, "gh", "api"); code != 1 || !strings.Contains(stderr, "no longer has the field chosen as its Token") {
+		t.Errorf("gh with stale mapping: stderr=%q code=%d", stderr, code)
+	}
+
+	// Fields labeled the way the plugin expects need no mapping. mysql's
+	// credential is provisioned as a temp file passed by flag (appended: that's
+	// upstream's provisioner), deleted afterwards.
+	writeConfig(globalDir, "mysql", "mysql", "database_credentials", "Test MySQL", `null`)
+	out, stderr, code := run(workDir, "mysql", "-e", "select 1")
+	if out != "args=-e select 1 --defaults-file\n[client]\nuser=\"dbuser\"\npassword=\"dbpass\"\n" || code != 0 {
+		t.Errorf("mysql: out=%q stderr=%q code=%d", out, stderr, code)
+	}
+	if _, err := os.Stat(strings.TrimSpace(stderr)); !os.IsNotExist(err) {
+		t.Errorf("mysql: temp config %q should be gone after the run: %v", strings.TrimSpace(stderr), err)
+	}
+}

@@ -98,6 +98,40 @@ wouldn't show it (for example while the screen is locked), every opcli command
 exits with status **3**. Any other error exits with 1. A wrapper can commit
 unsigned on 3 and still fail loudly when signing is actually broken.
 
+### Shell plugins
+
+`opcli plugin` authenticates other CLIs (`gh`, `fly`, `codex`, ...) with
+credentials from 1Password, like [`op plugin`](https://developer.1password.com/docs/cli/shell-plugins)
+does. The plugins are the same ones: [1Password/shell-plugins](https://github.com/1Password/shell-plugins)
+is compiled in (`make update-plugins` pulls the latest).
+
+```bash
+opcli plugin list              # every CLI there's a plugin for
+opcli plugin init gh           # choose the 1Password item that holds gh's token
+opcli plugin run -- gh pr list # run gh with that token
+opcli plugin inspect gh
+opcli plugin clear gh [--all] [--force]
+```
+
+`init` adds an alias (`gh` → `opcli plugin run -- gh`) to `~/.opcli/plugins.sh`
+for your shell's startup file to source. The chosen item is used for the
+current terminal session, a directory tree (`.opcli/plugins/` in it), or
+globally (`~/.opcli/plugins/`).
+
+Differences from `op`:
+
+- opcli is read-only, so `init` can't import a credential into 1Password or
+  rename an item's fields to what a plugin expects. Instead it asks which of
+  the item's fields to use and remembers that. And when the CLI's current
+  credential (from its config file or environment) is already in 1Password,
+  the items holding it are listed first.
+- Configuration lives under `.opcli`, not `.op`. The format is op's, plus the
+  field choices.
+- A session-scoped choice lasts 12 hours at most.
+- Not supported yet: plugins that take a choice of other plugins' credentials
+  (`terraform`, `tofu`), one-time-password fields, and the cache that lets a
+  plugin reuse temporary credentials between runs (both matter for `aws` with MFA).
+
 ### Secret reference format
 
 ```

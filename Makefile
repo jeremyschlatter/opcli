@@ -21,7 +21,7 @@ MACOS_MIN := 12.0
 export MACOSX_DEPLOYMENT_TARGET := $(MACOS_MIN)
 export CGO_CFLAGS := -mmacosx-version-min=$(MACOS_MIN)
 
-.PHONY: all clean sign test
+.PHONY: all clean sign test update-plugins
 
 all: opcli
 
@@ -54,6 +54,12 @@ test: libtouchid.a
 	go generate
 	go test ./...
 	@rm -f obfuscation.go
+
+# Pull the latest upstream shell plugins (for `opcli plugin`)
+update-plugins:
+	go get github.com/1Password/shell-plugins@main
+	scripts/gen-plugin-registry
+	go mod tidy
 
 # Sign the binary (required for Touch ID and Keychain ACL)
 sign: opcli

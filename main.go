@@ -113,11 +113,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse --account flag (can appear anywhere)
+	// Parse --account flag (can appear anywhere before a "--": what follows
+	// that is someone else's command line)
 	var accountFlag string
 	args := make([]string, 0, len(os.Args))
 	for i := 0; i < len(os.Args); i++ {
 		arg := os.Args[i]
+		if arg == "--" {
+			args = append(args, os.Args[i:]...)
+			break
+		}
 		if arg == "--account" && i+1 < len(os.Args) {
 			accountFlag = os.Args[i+1]
 			i++ // skip next arg
@@ -210,6 +215,12 @@ func main() {
 			fatal(err)
 		}
 		os.Exit(code)
+	case "plugin":
+		code, err := cmdPlugin(args[2:], accountFlag)
+		if err != nil {
+			fatal(err)
+		}
+		os.Exit(code)
 	case "versioned-backup-poll":
 		if err := cmdVersionedBackupPoll(); err != nil {
 			fatal(err)
@@ -235,6 +246,8 @@ func printUsage() {
 	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
 	fmt.Println("  opcli run [--env-file=<file>]... [--tui] -- <command>")
 	fmt.Println("                                       - Run command with secrets as env vars")
+	fmt.Println("  opcli plugin <list|init|inspect|clear|run>")
+	fmt.Println("                                       - Authenticate other CLIs with shell plugins")
 	fmt.Println("  opcli ssh-sign <op://vault/item/field> -Y sign -n <namespace> -f <pubkey file> <file>")
 	fmt.Println("                                       - Sign <file> with an SSH key (ssh-keygen -Y sign compatible)")
 	fmt.Println("  opcli account list                   - List all accounts")
