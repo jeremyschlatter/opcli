@@ -27,11 +27,13 @@ import (
 	"golang.org/x/term"
 )
 
-// pluginConfig says which 1Password item authenticates an executable. It is
-// op's format (~/.op/plugins/<executable>.json) plus the `fields` extension.
+// pluginConfig says which 1Password item holds a plugin's credential. It is
+// modeled on op's format (~/.op/plugins/<executable>.json), with two
+// differences: the `fields` extension, and there is one config per plugin
+// (<plugin>.json), shared by all of its executables (eg fly and flyctl),
+// where op has one per executable.
 type pluginConfig struct {
 	AccountID   string             `json:"account_id"`
-	Entrypoint  []string           `json:"entrypoint"`
 	Credentials []pluginCredential `json:"credentials"`
 }
 
@@ -59,7 +61,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 	usage := func() (int, error) {
 		fmt.Fprintln(os.Stderr, "Usage:")
 		fmt.Fprintln(os.Stderr, "  opcli plugin list                            - List available shell plugins")
-		fmt.Fprintln(os.Stderr, "  opcli plugin init [<executable>]             - Choose the 1Password item that authenticates a CLI")
+		fmt.Fprintln(os.Stderr, "  opcli plugin init [<executable>]             - Choose the 1Password item that authenticates a CLI, and shim it")
 		fmt.Fprintln(os.Stderr, "  opcli plugin inspect <executable>            - Show a plugin's configuration")
 		fmt.Fprintln(os.Stderr, "  opcli plugin clear <executable> [--all] [--force]")
 		fmt.Fprintln(os.Stderr, "                                               - Remove a plugin's configuration")
@@ -74,7 +76,27 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	aliasesPath := filepath.Join(dataDir, "plugins.sh")
+	// Shims are symlinks to opcli named for the executables that plugins
+	// authenticate. Run through one, opcli is `opcli plugin run -- <name>`
+	// (see main). The directory goes ahead of the real executables on the PATH.
+	shimsDir := filepath.Join(dataDir, "shims")
+	selfPath, err := os.Executable()
+	if err != nil {
+		return 0, err
+	}
+	self, err := os.Stat(selfPath)
+	if err != nil {
+		return 0, err
+	}
+	// shimActive reports whether running `name` runs opcli.
+	shimActive := func(name string) bool {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			return false
+		}
+		info, err := os.Stat(path)
+		return err == nil && os.SameFile(info, self)
+	}
 
 	// findExecutable looks up the plugin that handles the executable `name`.
 	findExecutable := func(name string) (schema.Plugin, schema.Executable, error) {
@@ -144,34 +166,50 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 			return 0, err
 		}
 
-		alias := fmt.Sprintf("alias %s=\"opcli plugin run -- %s\"", name, name)
-		aliases, err := os.ReadFile(aliasesPath)
-		if os.IsNotExist(err) {
-			aliases = []byte("export OPCLI_PLUGIN_ALIASES_SOURCED=1\n")
-		} else if err != nil {
+		// Shim every executable that authenticates with this credential,
+		// if it's installed: a shim for a missing executable would make it
+		// look installed.
+		credType, _ := pluginCredentialType(p, exe.Uses[0])
+		if err := os.MkdirAll(shimsDir, 0700); err != nil {
 			return 0, err
 		}
-		if !strings.Contains(string(aliases), alias+"\n") {
-			if err := os.WriteFile(aliasesPath, append(aliases, alias+"\n"...), 0600); err != nil {
+		var shimmed []string
+		for _, sibling := range p.Executables {
+			siblingName := sibling.Runs[0]
+			if _, _, err := findExecutable(siblingName); err != nil {
+				continue
+			}
+			if siblingCredType, _ := pluginCredentialType(p, sibling.Uses[0]); siblingCredType.pluginName != credType.pluginName {
+				continue
+			}
+			if _, err := pluginLookPath(siblingName); err != nil && siblingName != name {
+				continue
+			}
+			shim := filepath.Join(shimsDir, siblingName)
+			if err := os.Remove(shim); err != nil && !os.IsNotExist(err) {
 				return 0, err
 			}
+			if err := os.Symlink(selfPath, shim); err != nil {
+				return 0, err
+			}
+			shimmed = append(shimmed, siblingName)
 		}
 
-		fmt.Println()
-		if os.Getenv("OPCLI_PLUGIN_ALIASES_SOURCED") != "" {
-			fmt.Printf("To pick up the alias for %s in this terminal, run:\n\n  source %s\n\n", name, tildePath(aliasesPath))
-		} else {
-			rc := "<your shell's startup file>"
-			switch filepath.Base(os.Getenv("SHELL")) {
-			case "fish":
-				rc = "~/.config/fish/config.fish"
-			case "zsh":
-				rc = "~/.zshrc"
-			case "bash":
-				rc = "~/.bashrc"
-			}
-			fmt.Printf("The last step is to set up an alias for %s.\nYou can do so by running the following command:\n\n", name)
-			fmt.Printf("  echo \"source %s\" >> %s && source %s\n\n", tildePath(aliasesPath), rc, rc)
+		fmt.Printf("\nInstalled shims in %s: %s\n\n", tildePath(shimsDir), strings.Join(shimmed, ", "))
+		if shimActive(name) {
+			fmt.Printf("Run any %s command to see it in action!\n", name)
+			return 0, nil
+		}
+		fmt.Printf("The last step is to put the shims ahead of %s on your PATH.\nYou can do so by running the following command:\n\n", name)
+		switch filepath.Base(os.Getenv("SHELL")) {
+		case "fish":
+			fmt.Printf("  fish_add_path --prepend %s\n\n", shimsDir)
+		case "zsh":
+			fmt.Printf("  echo 'export PATH=\"%s:$PATH\"' >> ~/.zshrc && source ~/.zshrc\n\n", shimsDir)
+		case "bash":
+			fmt.Printf("  echo 'export PATH=\"%s:$PATH\"' >> ~/.bashrc && source ~/.bashrc\n\n", shimsDir)
+		default:
+			fmt.Printf("  export PATH=\"%s:$PATH\"   # in your shell's startup file\n\n", shimsDir)
 		}
 		fmt.Printf("Afterwards, run any %s command to see it in action!\n", name)
 		return 0, nil
@@ -181,26 +219,22 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 			return usage()
 		}
 		name := args[1]
-		p, _, err := findExecutable(name)
+		p, exe, err := findExecutable(name)
 		if err != nil {
 			return 0, err
 		}
-		fmt.Printf("%s\n\nConfigured Aliases\n\n", p.Platform.Name)
-		aliases, err := os.ReadFile(aliasesPath)
-		if err != nil && !os.IsNotExist(err) {
-			return 0, err
-		}
-		if strings.Contains(string(aliases), fmt.Sprintf("alias %s=", name)) {
-			fmt.Printf("✔ Alias for %q configured\n", name)
+		credType, _ := pluginCredentialType(p, exe.Uses[0])
+		fmt.Printf("%s\n\nShim\n\n", p.Platform.Name)
+		if shimActive(name) {
+			fmt.Printf("✔ %s runs through opcli\n", name)
+		} else if _, err := os.Lstat(filepath.Join(shimsDir, name)); err != nil {
+			fmt.Printf("✘ No shim for %s. Run `opcli plugin init %s` to install one.\n", name, name)
 		} else {
-			fmt.Printf("✘ No alias for %q. Run `opcli plugin init %s` to add one.\n", name, name)
-		}
-		if os.Getenv("OPCLI_PLUGIN_ALIASES_SOURCED") == "" {
-			fmt.Printf("✘ Aliases not sourced. Run `source %s` to be able to use opcli shell plugins.\n", tildePath(aliasesPath))
+			fmt.Printf("✘ The shim for %s isn't being used. Put %s ahead of it on your PATH.\n", name, tildePath(shimsDir))
 		}
 
 		fmt.Printf("\nConfigured Credentials\n\n")
-		configs, err := pluginConfigs(name)
+		configs, err := pluginConfigs(credType.pluginName)
 		if err != nil {
 			return 0, err
 		}
@@ -267,15 +301,17 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 		if name == "" {
 			return usage()
 		}
-		if _, _, err := findExecutable(name); err != nil {
+		p, exe, err := findExecutable(name)
+		if err != nil {
 			return 0, err
 		}
-		configs, err := pluginConfigs(name)
+		credType, _ := pluginCredentialType(p, exe.Uses[0])
+		configs, err := pluginConfigs(credType.pluginName)
 		if err != nil {
 			return 0, err
 		}
 		if len(configs) == 0 {
-			fmt.Printf("No configuration for %s to clear.\n", name)
+			fmt.Printf("No configuration for %s to clear.\n", p.Platform.Name)
 			return 0, nil
 		}
 		if !all {
@@ -284,7 +320,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 		for _, c := range configs {
 			if !force {
 				ok := false
-				if err := survey.AskOne(&survey.Confirm{Message: fmt.Sprintf("Clear the %s configuration for %s (%s)?", c.scope, name, tildePath(c.path))}, &ok); err != nil {
+				if err := survey.AskOne(&survey.Confirm{Message: fmt.Sprintf("Clear the %s configuration for %s (%s)?", c.scope, p.Platform.Name, tildePath(c.path))}, &ok); err != nil {
 					return 0, err
 				}
 				if !ok {
@@ -294,7 +330,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 			if err := os.Remove(c.path); err != nil {
 				return 0, err
 			}
-			fmt.Printf("Cleared the %s configuration for %s.\n", c.scope, name)
+			fmt.Printf("Cleared the %s configuration for %s.\n", c.scope, p.Platform.Name)
 		}
 		return 0, nil
 
@@ -325,7 +361,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 		}
 
 		var config *pluginConfig
-		configs, err := pluginConfigs(name)
+		configs, err := pluginConfigs(credType.pluginName)
 		if err != nil {
 			return 0, err
 		}
@@ -533,7 +569,7 @@ type foundPluginConfig struct {
 	path  string
 }
 
-// pluginConfigPath returns where the config for the executable `name` lives in
+// pluginConfigPath returns where the config for the plugin `name` lives in
 // the given scope. For the directory scope that's under the current directory.
 func pluginConfigPath(name, scope string) (string, error) {
 	dataDir, err := getDataDir()
@@ -559,7 +595,7 @@ func pluginConfigPath(name, scope string) (string, error) {
 	panic("unknown plugin scope: " + scope)
 }
 
-// pluginConfigs returns the configs that apply to the executable `name` here
+// pluginConfigs returns the configs that apply to the plugin `name` here
 // and now, highest precedence first: this terminal session, the enclosing
 // directories from the current one outward, then the global default.
 func pluginConfigs(name string) ([]foundPluginConfig, error) {
@@ -685,9 +721,8 @@ func tildePath(path string) string {
 }
 
 // pluginConfigure interactively picks the 1Password item that authenticates
-// exe and when to use it, and saves the choice.
+// exe (and the plugin's other executables) and when to use it, and saves the choice.
 func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string) (*pluginConfig, error) {
-	name := exe.Runs[0]
 	credType, _ := pluginCredentialType(p, exe.Uses[0])
 	fmt.Printf("\n%s\nAuthenticate with %s.\n\n", p.Platform.Name, credType.Name)
 
@@ -914,8 +949,8 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 		return nil, err
 	}
 
-	config := &pluginConfig{AccountID: chosen.account, Entrypoint: exe.Runs, Credentials: []pluginCredential{chosen.cred}}
-	path, err := pluginConfigPath(name, scopes[scope])
+	config := &pluginConfig{AccountID: chosen.account, Credentials: []pluginCredential{chosen.cred}}
+	path, err := pluginConfigPath(credType.pluginName, scopes[scope])
 	if err != nil {
 		return nil, err
 	}

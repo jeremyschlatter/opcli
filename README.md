@@ -113,20 +113,13 @@ opcli plugin inspect gh
 opcli plugin clear gh [--all] [--force]
 ```
 
-`init` adds an alias (`gh` → `opcli plugin run -- gh`) to `~/.opcli/plugins.sh`
-for your shell's startup file to source. The chosen item is used for the
-current terminal session, a directory tree (`.opcli/plugins/` in it), or
-globally (`~/.opcli/plugins/`).
+`init` also installs a shim for the CLI in `~/.opcli/shims`: a symlink to opcli
+named for the executable. Put that directory ahead of the real executables on
+your `PATH`. Run through a shim, opcli acts as `opcli plugin run -- <name>`,
+and finds the real executable further along the `PATH`.
 
-An alias only works in an interactive shell. For scripts and coding agents,
-use a shim instead: a symlink to opcli named for the executable, in a directory
-ahead of the real one on your `PATH`. Run through it, opcli acts as
-`opcli plugin run -- <name>`, and finds the real executable further along the `PATH`.
-
-```bash
-mkdir -p ~/.opcli/shims && ln -s "$(which opcli)" ~/.opcli/shims/gh
-export PATH="$HOME/.opcli/shims:$PATH"
-```
+The chosen item is used for the current terminal session, a directory tree
+(`.opcli/plugins/` in it), or globally (`~/.opcli/plugins/`).
 
 Differences from `op`:
 
@@ -135,9 +128,12 @@ Differences from `op`:
   the item's fields to use and remembers that. And when the CLI's current
   credential (from its config file or environment) is already in 1Password,
   the items holding it are listed first.
-- Shims (above) are an opcli addition.
-- Configuration lives under `.opcli`, not `.op`. The format is op's, plus the
-  field choices.
+- Shims instead of shell aliases. Unlike an alias, a shim also works in
+  scripts and for coding agents.
+- One configuration per plugin, not per executable: `fly` and `flyctl` (or
+  `psql` and `pg_dump`) always use the same item, and `init` for one shims
+  the others that are installed.
+- Configuration lives under `.opcli`, not `.op`.
 - Not supported yet: plugins that take a choice of other plugins' credentials
   (`terraform`, `tofu`), one-time-password fields, and the cache that lets a
   plugin reuse temporary credentials between runs (both matter for `aws` with MFA).

@@ -432,7 +432,9 @@ func TestE2E_PluginRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, script := range map[string]string{
-		"gh":    `echo "token=$GH_TOKEN args=$*"; exit 7`,
+		"gh":     `echo "token=$GH_TOKEN args=$*"; exit 7`,
+		"fly":    `echo "fly token=$FLY_ACCESS_TOKEN"`,
+		"flyctl": `echo "flyctl token=$FLY_ACCESS_TOKEN"`,
 		"mysql": `for last; do :; done; echo "args=${*%%=*}"; cat "${last#--defaults-file=}"; echo "${last#--defaults-file=}" >&2`,
 	} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"+script+"\n"), 0755); err != nil {
@@ -441,14 +443,14 @@ func TestE2E_PluginRun(t *testing.T) {
 	}
 	extraEnv := map[string]string{"PATH": binDir + ":" + os.Getenv("PATH")}
 
-	writeConfig := func(dir, exe, plugin, credType, item string, fields string) {
+	writeConfig := func(dir, plugin, credType, item string, fields string) {
 		t.Helper()
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		config := fmt.Sprintf(`{"account_id": %q, "entrypoint": [%q], "credentials": [{"plugin": %q, "credential_type": %q, "usage_id": %q, "vault_id": %q, "item_id": %q, "fields": %s}]}`,
-			env.testDB.AccountUUID, exe, plugin, credType, credType, vault.UUID, vault.Items[item].UUID, fields)
-		if err := os.WriteFile(filepath.Join(dir, exe+".json"), []byte(config), 0600); err != nil {
+		config := fmt.Sprintf(`{"account_id": %q, "credentials": [{"plugin": %q, "credential_type": %q, "usage_id": %q, "vault_id": %q, "item_id": %q, "fields": %s}]}`,
+			env.testDB.AccountUUID, plugin, credType, credType, vault.UUID, vault.Items[item].UUID, fields)
+		if err := os.WriteFile(filepath.Join(dir, plugin+".json"), []byte(config), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -474,7 +476,7 @@ func TestE2E_PluginRun(t *testing.T) {
 
 	// Global config, with a field mapping (the item's field is "credential", the plugin wants "Token").
 	// The executable's exit code and its own --account flag pass through.
-	writeConfig(globalDir, "gh", "github", "personal_access_token", "Test API Key", `{"Token": "credential"}`)
+	writeConfig(globalDir, "github", "personal_access_token", "Test API Key", `{"Token": "credential"}`)
 	if out, stderr, code := run(workDir, "gh", "api", "--account", "x"); out != "token=api-key-12345 args=api --account x\n" || code != 7 {
 		t.Errorf("gh with global config: out=%q stderr=%q code=%d", out, stderr, code)
 	}
@@ -504,14 +506,22 @@ func TestE2E_PluginRun(t *testing.T) {
 		}
 	}
 
+	// A plugin's executables share its config: fly and flyctl are both the flyctl plugin's.
+	writeConfig(globalDir, "flyctl", "access_token", "Test API Key", `{"Token": "credential"}`)
+	for _, exe := range []string{"fly", "flyctl"} {
+		if out, stderr, code := run(workDir, exe, "status"); out != exe+" token=api-key-12345\n" || code != 0 {
+			t.Errorf("%s: out=%q stderr=%q code=%d", exe, out, stderr, code)
+		}
+	}
+
 	// A directory config beats the global one, in subdirectories too.
-	writeConfig(filepath.Join(workDir, ".opcli", "plugins"), "gh", "github", "personal_access_token", "Test Login", `{"Token": "password"}`)
+	writeConfig(filepath.Join(workDir, ".opcli", "plugins"), "github", "personal_access_token", "Test Login", `{"Token": "password"}`)
 	if out, stderr, code := run(filepath.Join(workDir, "sub"), "gh", "api"); out != "token=secret123 args=api\n" || code != 7 {
 		t.Errorf("gh with directory config: out=%q stderr=%q code=%d", out, stderr, code)
 	}
 
 	// A mapping to a field that's gone is an error, not a silent omission.
-	writeConfig(globalDir, "gh", "github", "personal_access_token", "Test API Key", `{"Token": "nosuchfield"}`)
+	writeConfig(globalDir, "github", "personal_access_token", "Test API Key", `{"Token": "nosuchfield"}`)
 	if _, stderr, code := run(env.tmpDir, "gh", "api"); code != 1 || !strings.Contains(stderr, "no longer has the field chosen as its Token") {
 		t.Errorf("gh with stale mapping: stderr=%q code=%d", stderr, code)
 	}
@@ -519,7 +529,7 @@ func TestE2E_PluginRun(t *testing.T) {
 	// Fields labeled the way the plugin expects need no mapping. mysql's
 	// credential is provisioned as a temp file passed by flag (appended: that's
 	// upstream's provisioner), deleted afterwards.
-	writeConfig(globalDir, "mysql", "mysql", "database_credentials", "Test MySQL", `null`)
+	writeConfig(globalDir, "mysql", "database_credentials", "Test MySQL", `null`)
 	out, stderr, code := run(workDir, "mysql", "-e", "select 1")
 	if out != "args=-e select 1 --defaults-file\n[client]\nuser=\"dbuser\"\npassword=\"dbpass\"\n" || code != 0 {
 		t.Errorf("mysql: out=%q stderr=%q code=%d", out, stderr, code)
