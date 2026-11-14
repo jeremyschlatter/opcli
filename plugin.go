@@ -317,7 +317,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 		// Commands like `gh --version` don't need credentials: skip 1Password entirely.
 		needsAuth := sdk.NeedsAuthenticationInput{CredentialType: credType.Name.ID().String(), CommandArgs: cmdArgs[1:]}
 		if exe.NeedsAuth != nil && !exe.NeedsAuth(needsAuth) || use.NeedsAuth != nil && !use.NeedsAuth(needsAuth) {
-			binary, err := exec.LookPath(name)
+			binary, err := pluginLookPath(name)
 			if err != nil {
 				return 0, err
 			}
@@ -425,7 +425,12 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 
 		// Run as a child (not exec) so we can clean up afterwards. The child
 		// gets the terminal directly: no output masking, so TUIs work.
-		cmd := exec.Command(out.CommandLine[0], out.CommandLine[1:]...)
+		binary, err := pluginLookPath(out.CommandLine[0])
+		if err != nil {
+			return 0, err
+		}
+		cmd := exec.Command(binary)
+		cmd.Args = out.CommandLine
 		cmd.Env = os.Environ()
 		for k, v := range out.Environment {
 			cmd.Env = append(cmd.Env, k+"="+v)
@@ -466,6 +471,30 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 	default:
 		return usage()
 	}
+}
+
+// pluginLookPath finds an executable on the PATH like exec.LookPath, but skips
+// opcli itself: when a shim (a symlink to opcli, named for the executable) comes
+// first on the PATH, we want the real executable behind it.
+func pluginLookPath(name string) (string, error) {
+	if strings.Contains(name, "/") {
+		return exec.LookPath(name)
+	}
+	selfPath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	self, err := os.Stat(selfPath)
+	if err != nil {
+		return "", err
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0111 != 0 && !os.SameFile(info, self) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("%s: executable not found in $PATH", name)
 }
 
 // pluginCredentialType resolves the credential an executable uses, along with

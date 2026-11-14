@@ -479,6 +479,31 @@ func TestE2E_PluginRun(t *testing.T) {
 		t.Errorf("gh with global config: out=%q stderr=%q code=%d", out, stderr, code)
 	}
 
+	// Shim: a symlink to opcli named gh, ahead of the real gh on the PATH, is
+	// `plugin run -- gh`. All of its arguments belong to gh.
+	{
+		shimDir := filepath.Join(env.tmpDir, "shims")
+		if err := os.Mkdir(shimDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(env.binPath, filepath.Join(shimDir, "gh")); err != nil {
+			t.Fatal(err)
+		}
+		shim := *env
+		shim.binPath = filepath.Join(shimDir, "gh")
+		shimEnv := map[string]string{"PATH": shimDir + ":" + extraEnv["PATH"]}
+		if out, stderr, code := shim.runCLI(workDir, "", shimEnv, "api", "--account", "x"); out != "token=api-key-12345 args=api --account x\n" || code != 7 {
+			t.Errorf("gh shim: out=%q stderr=%q code=%d", out, stderr, code)
+		}
+		if out, stderr, code := shim.runCLI(workDir, "", shimEnv, "--version"); out != "token= args=--version\n" || code != 7 {
+			t.Errorf("gh shim --version: out=%q stderr=%q code=%d", out, stderr, code)
+		}
+		// The alias form works with the shim on the PATH too.
+		if out, stderr, code := env.runCLI(workDir, "", shimEnv, "plugin", "run", "--", "gh", "api"); out != "token=api-key-12345 args=api\n" || code != 7 {
+			t.Errorf("plugin run with gh shim on PATH: out=%q stderr=%q code=%d", out, stderr, code)
+		}
+	}
+
 	// A directory config beats the global one, in subdirectories too.
 	writeConfig(filepath.Join(workDir, ".opcli", "plugins"), "gh", "github", "personal_access_token", "Test Login", `{"Token": "password"}`)
 	if out, stderr, code := run(filepath.Join(workDir, "sub"), "gh", "api"); out != "token=secret123 args=api\n" || code != 7 {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -108,6 +109,17 @@ func fatal(err error) {
 }
 
 func main() {
+	// Shim mode: run through a symlink named for another executable (eg
+	// ~/.opcli/shims/fly -> opcli), we are that executable's shell plugin.
+	// Unlike a shell alias, a shim on the PATH also works for scripts and agents.
+	if name := filepath.Base(os.Args[0]); !strings.HasPrefix(name, "opcli") {
+		code, err := cmdPlugin(append([]string{"run", "--", name}, os.Args[1:]...), "")
+		if err != nil {
+			fatal(err)
+		}
+		os.Exit(code)
+	}
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)

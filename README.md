@@ -118,6 +118,16 @@ for your shell's startup file to source. The chosen item is used for the
 current terminal session, a directory tree (`.opcli/plugins/` in it), or
 globally (`~/.opcli/plugins/`).
 
+An alias only works in an interactive shell. For scripts and coding agents,
+use a shim instead: a symlink to opcli named for the executable, in a directory
+ahead of the real one on your `PATH`. Run through it, opcli acts as
+`opcli plugin run -- <name>`, and finds the real executable further along the `PATH`.
+
+```bash
+mkdir -p ~/.opcli/shims && ln -s "$(which opcli)" ~/.opcli/shims/gh
+export PATH="$HOME/.opcli/shims:$PATH"
+```
+
 Differences from `op`:
 
 - opcli is read-only, so `init` can't import a credential into 1Password or
@@ -125,6 +135,7 @@ Differences from `op`:
   the item's fields to use and remembers that. And when the CLI's current
   credential (from its config file or environment) is already in 1Password,
   the items holding it are listed first.
+- Shims (above) are an opcli addition.
 - Configuration lives under `.opcli`, not `.op`. The format is op's, plus the
   field choices.
 - Not supported yet: plugins that take a choice of other plugins' credentials
