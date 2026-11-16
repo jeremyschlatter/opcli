@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math/big"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -501,53 +503,51 @@ func cmdSignout(accountFlag string) error {
 	return nil
 }
 
-// getCredentials gets the account password for an account, using session-based auth if available.
-// pendingRefs lists the op:// references driving this authentication; they are
-// displayed in a context window shown alongside the TouchID prompt.
-func getCredentials(accountUUID string, pendingRefs []string) (password string, err error) {
-	// Check for existing valid session
-	session, _ := GetValidSession(accountUUID)
-
-	pw, err := GetPassword(accountUUID)
-	if err != nil {
-		return "", fmt.Errorf("no account configured (run 'opcli signin' first)")
-	}
-
-	if session == nil {
-		// No valid session - require biometric auth
-		if err := AuthenticateBiometric("access your 1Password credentials", pendingRefs); err != nil {
-			return "", fmt.Errorf("authentication failed: %w", err)
-		}
-
-		// When OPCLI_AUTO_ACCOUNT is enabled, create sessions for all stored accounts
-		// so the user only needs to authenticate once via TouchID.
-		if os.Getenv("OPCLI_AUTO_ACCOUNT") != "" {
-			if store, err := GetStoredAccounts(); err == nil {
-				for uuid := range store.Accounts {
-					if _, err := CreateSession(uuid); err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: could not create session for account: %v\n", err)
-					}
-				}
-			}
-		} else {
-			// Create session for just this account
-			if _, err := CreateSession(accountUUID); err != nil {
-				// Non-fatal, continue without session
-				fmt.Fprintf(os.Stderr, "Warning: could not create session: %v\n", err)
-			}
-		}
-	}
-
-	return pw, nil
-}
-
 // AccountKeychains manages lazily-opened account keychains sharing a single DB connection.
 type AccountKeychains struct {
 	getDB          func() (*sql.DB, error)     // lazy DB open (started in background by openKeychains)
 	defaultAccount string                      // UUID of the default/flag-specified account
 	accounts       map[string]*AccountKeychain // keyed by account UUID
 	store          *CredentialStore
-	pendingRefs    []string // op:// refs to show in the TouchID context window
+	authorized     bool // Touch ID covers what this command reads: see authorize
+}
+
+// authorize makes sure the user has approved, with Touch ID, each thing the
+// command is about to read. Nothing can be read before it: get refuses.
+func (aks *AccountKeychains) authorize(grants ...Grant) error {
+	if err := Authorize(grants); err != nil {
+		return err
+	}
+	aks.authorized = true
+	return nil
+}
+
+// authorizeRefs is authorize for op:// URIs that will go to resolveRef.
+func (aks *AccountKeychains) authorizeRefs(uris ...string) error {
+	// What a URI resolves to depends on these, so an approval is tied to them.
+	context := aks.defaultAccount
+	if os.Getenv("OPCLI_AUTO_ACCOUNT") != "" {
+		context += "+auto"
+	}
+	var grants []Grant
+	for _, uri := range uris {
+		grants = append(grants, Grant{Key: "ref:" + context + ":" + uri, Ref: uri})
+	}
+	return aks.authorize(grants...)
+}
+
+// authorizeEverything asks for Touch ID to read every item of the given
+// accounts (UUIDs). It asks every time: nothing stays approved afterwards.
+func (aks *AccountKeychains) authorizeEverything(accounts []string) error {
+	var names []string
+	for _, uuid := range accounts {
+		names = append(names, aks.store.Accounts[uuid].Shorthand)
+	}
+	if err := AuthenticateBiometricEverything(names); err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+	aks.authorized = true
+	return nil
 }
 
 func openKeychains(accountFlag string, t *timer) (*AccountKeychains, error) {
@@ -620,21 +620,12 @@ func (aks *AccountKeychains) get(identifier string, t *timer) (*AccountKeychain,
 		return nil, fmt.Errorf("account not found in stored credentials (run 'opcli signin' first)")
 	}
 
-	// Pass pending refs only when auth will actually be prompted (no valid
-	// session). Once consumed, clear them so a second account lookup in the
-	// same command doesn't reuse a stale list.
-	var refsForAuth []string
-	if session, _ := GetValidSession(uuid); session == nil {
-		refsForAuth = aks.pendingRefs
-		aks.pendingRefs = nil
+	if !aks.authorized {
+		panic("AccountKeychains.get before authorize")
 	}
-
-	password, err := getCredentials(uuid, refsForAuth)
+	password, err := GetPassword(uuid)
 	if err != nil {
 		return nil, err
-	}
-	if t != nil {
-		t.mark("get credentials (session check)")
 	}
 
 	db, err := aks.getDB()
@@ -1035,7 +1026,10 @@ func cmdRead(uri string, accountFlag string) error {
 	}
 	defer aks.Close()
 
-	aks.pendingRefs = []string{uri}
+	if err := aks.authorizeRefs(uri); err != nil {
+		return err
+	}
+	t.mark("authorize (session check)")
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {
@@ -1263,6 +1257,9 @@ func cmdList(accountFlag string) error {
 	}
 	defer aks.Close()
 
+	if err := aks.authorize(Grant{Key: "list:" + aks.defaultAccount, Ref: "op://Vault names/every vault"}); err != nil {
+		return err
+	}
 	ak, err := aks.get("", nil)
 	if err != nil {
 		return err
@@ -1322,6 +1319,12 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	defer aks.Close()
 
+	if err := aks.authorize(Grant{
+		Key: "get:" + aks.defaultAccount + ":" + vaultName + "/" + itemName,
+		Ref: "op://" + vaultName + "/" + itemName + "/every field",
+	}); err != nil {
+		return err
+	}
 	ak, err := aks.get("", nil) // default account
 	if err != nil {
 		return err
@@ -1445,8 +1448,8 @@ func cmdInject(args []string, accountFlag string) error {
 	}
 	defer aks.Close()
 
-	for uri := range uris {
-		aks.pendingRefs = append(aks.pendingRefs, uri)
+	if err := aks.authorizeRefs(slices.Collect(maps.Keys(uris))...); err != nil {
+		return err
 	}
 
 	// Resolve all secrets
@@ -1572,14 +1575,16 @@ func cmdRun(args []string, accountFlag string) (int, error) {
 			return 0, err
 		}
 
-		for _, uri := range secretRefs {
-			aks.pendingRefs = append(aks.pendingRefs, uri)
-		}
+		uris := slices.Collect(maps.Values(secretRefs))
 		if argsHaveRefs {
 			opRefPattern := regexp.MustCompile(`op://(?:[a-zA-Z0-9_.-]+:)?[a-zA-Z0-9_./ -]*[a-zA-Z0-9_./-]`)
 			for _, arg := range cmdArgs {
-				aks.pendingRefs = append(aks.pendingRefs, opRefPattern.FindAllString(arg, -1)...)
+				uris = append(uris, opRefPattern.FindAllString(arg, -1)...)
 			}
+		}
+		if err := aks.authorizeRefs(uris...); err != nil {
+			aks.Close()
+			return 0, err
 		}
 
 		for name, uri := range secretRefs {

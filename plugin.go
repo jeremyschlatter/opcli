@@ -60,6 +60,16 @@ type pluginCredential struct {
 	Fields map[string]string `json:"fields,omitempty"`
 }
 
+// pluginGrant is the approval needed to read the item configured as the
+// credential for the executable name. It is tied to the item, not just the
+// executable: the config file naming the item is writable by anyone.
+func pluginGrant(name, accountUUID string, cred pluginCredential) Grant {
+	return Grant{
+		Key: "item:" + accountUUID + "/" + cred.VaultID + "/" + cred.ItemID,
+		Ref: "op://shell plugin/" + name,
+	}
+}
+
 const (
 	pluginScopeSession   = "session"
 	pluginScopeDirectory = "directory"
@@ -257,12 +267,14 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 				return 0, err
 			}
 			defer aks.Close()
-			aks.pendingRefs = []string{"op://shell plugin/" + name}
+			cred := c.Credentials[0]
+			if err := aks.authorize(pluginGrant(name, aks.defaultAccount, cred)); err != nil {
+				return 0, err
+			}
 			ak, err := aks.get("", nil)
 			if err != nil {
 				return 0, err
 			}
-			cred := c.Credentials[0]
 			item, err := getItem(ak.db, ak.accountUUID, cred.VaultID, cred.ItemID)
 			if err != nil {
 				return 0, err
@@ -413,7 +425,10 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			aks.pendingRefs = []string{"op://shell plugin/" + name}
+			if err := aks.authorize(pluginGrant(name, aks.defaultAccount, cred)); err != nil {
+				aks.Close()
+				return 0, err
+			}
 			ak, err := aks.get("", nil)
 			if err != nil {
 				aks.Close()
@@ -809,9 +824,6 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 			return nil, err
 		}
 		defer aks.Close()
-		// Shown beside the Touch ID prompt: unlike other commands, this one reads everything.
-		aks.pendingRefs = []string{"op://Full database access/every vault/every item"}
-
 		accounts := []string{aks.defaultAccount}
 		if accountFlag == "" && os.Getenv("OP_ACCOUNT") == "" && os.Getenv("OPCLI_AUTO_ACCOUNT") != "" {
 			for _, uuid := range sortedKeys(aks.store.Accounts) {
@@ -819,6 +831,11 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 					accounts = append(accounts, uuid)
 				}
 			}
+		}
+		// Unlike other commands, this one reads everything: the items are
+		// searched for the detected credential, and listed to choose from.
+		if err := aks.authorizeEverything(accounts); err != nil {
+			return nil, err
 		}
 		for _, account := range accounts {
 			ak, err := aks.get(account, nil)

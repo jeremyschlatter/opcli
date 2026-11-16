@@ -45,7 +45,7 @@ The release binary is signed with my certificate. To build from source you will 
 # First time: sign in (stores credentials in Keychain)
 opcli signin
 
-# Read a field from an item (prompts Touch ID on first use per terminal)
+# Read a field from an item (prompts Touch ID the first time a terminal reads it)
 opcli read "op://VaultName/ItemName/fieldname"
 
 # Read a field in a section
@@ -90,8 +90,9 @@ exec opcli ssh-sign "op://Private/My SSH Key/private_key" "$@"
 ```
 
 Unlike the 1Password agent, the Touch ID prompt belongs to the `opcli` process,
-so killing it (say, with `timeout`) takes the prompt down with it. Sessions
-apply as usual: one approval covers 10 minutes of commits from that terminal.
+so killing it (say, with `timeout`) takes the prompt down with it. Approvals
+last as usual: one covers commits from that terminal until 10 minutes pass
+without one.
 
 When Touch ID doesn't authenticate, because the prompt was cancelled or macOS
 wouldn't show it (for example while the screen is locked), every opcli command
@@ -120,6 +121,10 @@ and finds the real executable further along the `PATH`.
 
 The chosen item is used for the current terminal session, a directory tree
 (`.opcli/plugins/` in it), or globally (`~/.opcli/plugins/`).
+
+To let you search for the item, `init` reads every item in your vaults. Its
+Touch ID prompt says so, in orange, and that approval is for the one command:
+it is never remembered.
 
 Some programs run a CLI in the background (Claude Code checks `gh auth token`
 every time it starts), which through a shim means a Touch ID prompt out of
@@ -175,12 +180,21 @@ Your account password is stored in the macOS Keychain with an app-only ACL. Afte
 
 ### Sessions
 
-Each terminal session requires Touch ID authentication on first access. After authenticating:
-- The session lasts for **10 minutes of inactivity**
-- Hard limit of **12 hours** before re-authentication is required
-- Each terminal window/tab has its own session
+Touch ID approves specific secrets, not access to your vaults. The prompt lists
+the `op://` references a command is about to read, and approving it covers
+those references and nothing else. A command that needs something not yet
+approved prompts again, listing only what's new.
 
-This mirrors the UX of the official `op` CLI's desktop app integration.
+An approval:
+- lasts until its reference goes **10 minutes** without being read
+- lasts **12 hours** at most
+- belongs to one terminal window/tab
+
+The only command that reads more than it lists is `opcli plugin init`, which
+needs every item (see [Shell plugins](#shell-plugins)). Its approval isn't kept.
+
+This is narrower than the official `op` CLI's desktop app integration, where
+one approval gives a terminal access to the whole account for 10 minutes.
 
 ## Requirements
 

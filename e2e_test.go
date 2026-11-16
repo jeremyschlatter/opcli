@@ -2,10 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -365,41 +362,31 @@ func runTestCases(t *testing.T, env *testEnv, allTests map[string][]yamlTestCase
 	}
 }
 
-func TestE2E_AutoAccountSessionCoversAll(t *testing.T) {
+// With OPCLI_AUTO_ACCOUNT, a ref can resolve in an account other than the
+// default one. Approving the ref covers that: there is no second prompt for
+// the other account, now or on the next read.
+func TestE2E_AutoAccountOneApproval(t *testing.T) {
 	env := setupTestEnv(t, false)
 	t.Cleanup(func() { env.cleanup(t) })
+	promptLog := filepath.Join(env.tmpDir, "prompts")
 
-	// Use a fresh session key so no sessions exist yet
-	freshSessionKey := "auto-account-session-test"
-
-	// Clear any existing sessions by removing the sessions file
-	sessionsFile := filepath.Join(env.dataDir, "sessions.json")
-	os.Remove(sessionsFile)
-
-	// Run a command that uses OPCLI_AUTO_ACCOUNT to access a vault
-	// from a non-default account. This should create sessions for ALL accounts.
-	_, _, code := env.runCLI("", "", map[string]string{
-		"OPCLI_AUTO_ACCOUNT":       "1",
-		"OP_ACCOUNT":               "my",
-		"OPCLI_TEST_SESSION_KEY":   freshSessionKey,
-	}, "read", "op://Shared/Work Login/password")
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-
-	// Read the sessions file and verify sessions exist for all accounts
-	data, err := os.ReadFile(sessionsFile)
-	if err != nil {
-		t.Fatalf("failed to read sessions file: %v", err)
-	}
-
-	// Verify that sessions were created for both accounts
-	for _, acct := range env.testDB.Accounts {
-		expectedKey := freshSessionKey + ":" + acct.UUID
-		if !strings.Contains(string(data), acct.UUID) {
-			t.Errorf("session not created for account %s (%s); sessions file: %s", acct.Shorthand, acct.UUID, string(data))
+	for i := range 2 {
+		_, stderr, code := env.runCLI("", "", map[string]string{
+			"OPCLI_AUTO_ACCOUNT":      "1",
+			"OP_ACCOUNT":              "my",
+			"OPCLI_TEST_SESSION_KEY":  "auto-account-test",
+			"OPCLI_TEST_TOUCHID_LOG":  promptLog,
+		}, "read", "op://Shared/Work Login/password")
+		if code != 0 {
+			t.Fatalf("read %d: exit code %d; stderr: %s", i, code, stderr)
 		}
-		_ = expectedKey
+	}
+	prompts, err := os.ReadFile(promptLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(prompts), "\n"); n != 1 {
+		t.Errorf("expected 1 Touch ID prompt, got %d: %s", n, prompts)
 	}
 }
 
@@ -423,112 +410,126 @@ func TestE2E_TouchIDFail(t *testing.T) {
 	}
 }
 
-// sessions.json is writable by any process running as the user, so an entry
-// only counts if its MAC checks out against the secret in the keychain.
-// OPCLI_TEST_TOUCHID_FAIL makes "this session was accepted" observable: the
+// Touch ID approves refs, not terminals: an approval covers exactly what its
+// prompt listed, for the terminal session it was given in.
+func TestE2E_ApprovalScope(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+	promptLog := filepath.Join(env.tmpDir, "prompts")
+
+	// run runs opcli in the given terminal session and returns its exit code
+	// and the Touch ID prompts it put up (their payloads, one per line).
+	run := func(sessionKey string, touchIDFails bool, args ...string) (int, string) {
+		os.Remove(promptLog)
+		extraEnv := map[string]string{"OPCLI_TEST_SESSION_KEY": sessionKey, "OPCLI_TEST_TOUCHID_LOG": promptLog}
+		if touchIDFails {
+			extraEnv["OPCLI_TEST_TOUCHID_FAIL"] = "1"
+		}
+		_, _, code := env.runCLI("", "", extraEnv, args...)
+		prompts, err := os.ReadFile(promptLog)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return code, string(prompts)
+	}
+	const (
+		password = "op://Private/Test Login/password"
+		username = "op://Private/Test Login/username"
+	)
+
+	if code, prompts := run("terminal 1", false, "read", password); code != 0 || !strings.Contains(prompts, `"Test Login/password"`) {
+		t.Fatalf("first read: exit code %d, prompts: %s", code, prompts)
+	}
+	if code, prompts := run("terminal 1", true, "read", password); code != 0 || prompts != "" {
+		t.Errorf("an approved ref should not need Touch ID again: exit code %d, prompts: %s", code, prompts)
+	}
+
+	for name, args := range map[string][]string{
+		"another field of the same item": {"read", username},
+		"the whole item":                 {"get", "op://Private/Test Login"},
+		"the vault list":                 {"list"},
+	} {
+		if code, prompts := run("terminal 1", true, args...); code != exitAuthRefused || prompts == "" {
+			t.Errorf("%s should need its own approval: exit code %d, prompts: %s", name, code, prompts)
+		}
+	}
+	if code, _ := run("terminal 2", true, "read", password); code != exitAuthRefused {
+		t.Errorf("another terminal should need its own approval: exit code %d", code)
+	}
+
+	// A command that needs several refs asks only for the unapproved ones.
+	code, prompts := run("terminal 1", false, "run", "--env-file", "/dev/null", "--", "true")
+	if code != 0 || prompts != "" {
+		t.Fatalf("run with no refs: exit code %d, prompts: %s", code, prompts)
+	}
+	envFile := filepath.Join(env.tmpDir, "approval-scope.env")
+	if err := os.WriteFile(envFile, []byte("A="+password+"\nB="+username+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, prompts = run("terminal 1", false, "run", "--env-file", envFile, "--", "true")
+	if code != 0 || !strings.Contains(prompts, `"Test Login/username"`) || strings.Contains(prompts, `"Test Login/password"`) {
+		t.Errorf("run with one approved ref and one new: exit code %d, prompts: %s", code, prompts)
+	}
+}
+
+// sessions.json is writable (and readable) by any process running as the
+// user, so an approval only counts if its MAC checks out against the secret
+// in the keychain, and the file doesn't say what the approvals are for.
+// OPCLI_TEST_TOUCHID_FAIL makes "this was already approved" observable: the
 // read succeeds only if no Touch ID prompt was needed.
 func TestE2E_SessionTampering(t *testing.T) {
 	env := setupTestEnv(t, false)
 	t.Cleanup(func() { env.cleanup(t) })
 	sessionsFile := filepath.Join(env.dataDir, "sessions.json")
-	const sessionKey = "session-tampering-test"
+	const ref = "op://Private/Test Login/password"
 
-	// read reads something from acct on the given terminal session, and
-	// returns the exit code.
-	read := func(acct *TestAccount, sessionKey string, touchIDFails bool) int {
-		ref, err := firstReadableRef(acct)
-		if err != nil {
-			t.Fatal(err)
-		}
-		extraEnv := map[string]string{"OPCLI_TEST_SESSION_KEY": sessionKey}
+	read := func(touchIDFails bool) int {
+		extraEnv := map[string]string{"OPCLI_TEST_SESSION_KEY": "session-tampering-test"}
 		if touchIDFails {
 			extraEnv["OPCLI_TEST_TOUCHID_FAIL"] = "1"
 		}
 		_, _, code := env.runCLI("", "", extraEnv, "read", ref)
 		return code
 	}
-	victim := env.testDB.Accounts[0]
-	accountUUID := victim.UUID
-	entryKey := sessionKey + ":" + accountUUID
-	loadStore := func() (store SessionStore) {
-		data, err := os.ReadFile(sessionsFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(data, &store); err != nil {
-			t.Fatal(err)
-		}
-		return
+
+	os.Remove(sessionsFile)
+	if code := read(false); code != 0 {
+		t.Fatalf("getting an approval: exit code %d", code)
 	}
-	writeStore := func(store SessionStore) {
-		data, err := json.Marshal(store)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(sessionsFile, data, 0600); err != nil {
-			t.Fatal(err)
-		}
+	if code := read(true); code != 0 {
+		t.Fatalf("a real approval should not need Touch ID, got exit code %d", code)
 	}
 
-	// An entry MAC'd the way opcli used to do it, with a "secret" derived
-	// from the account UUIDs, which anyone can read out of sessions.json.
-	{
-		oldSecret := make([]byte, 32)
-		for _, acct := range env.testDB.Accounts {
-			for i, b := range []byte(acct.UUID) {
-				oldSecret[i%32] ^= b
-			}
+	data, err := os.ReadFile(sessionsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Private", "Test Login", "password", "session-tampering-test"} {
+		if strings.Contains(string(data), name) {
+			t.Errorf("sessions.json mentions %q: %s", name, data)
 		}
-		now := time.Now()
-		h := hmac.New(sha256.New, oldSecret)
-		fmt.Fprintf(h, "%s:%s:%d", sessionKey, accountUUID, now.Unix())
-		writeStore(SessionStore{Sessions: map[string]*Session{entryKey: {
-			AccountID: accountUUID, Created: now, LastAccess: now, MAC: hex.EncodeToString(h.Sum(nil)),
-		}}})
-		if code := read(victim, sessionKey, true); code != exitAuthRefused {
-			t.Errorf("forged session: expected exit code %d, got %d", exitAuthRefused, code)
-		}
+	}
+	var store SessionStore
+	if err := json.Unmarshal(data, &store); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Approvals) != 1 {
+		t.Fatalf("expected 1 approval, got: %s", data)
 	}
 
-	// A real session, for contrast and as raw material for the rest.
-	if code := read(victim, sessionKey, false); code != 0 {
-		t.Fatalf("creating a session: exit code %d", code)
+	// Moving a real approval's timestamps (to outlive the inactivity timeout).
+	for _, a := range store.Approvals {
+		a.LastAccess = a.LastAccess.Add(time.Minute)
 	}
-	if code := read(victim, sessionKey, true); code != 0 {
-		t.Fatalf("a real session should not need Touch ID, got exit code %d", code)
+	data, err = json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Moving a real entry's timestamps (to outlive the inactivity timeout).
-	{
-		store := loadStore()
-		store.Sessions[entryKey].LastAccess = store.Sessions[entryKey].LastAccess.Add(time.Minute)
-		writeStore(store)
-		if code := read(victim, sessionKey, true); code != exitAuthRefused {
-			t.Errorf("session with edited last_access: expected exit code %d, got %d", exitAuthRefused, code)
-		}
+	if err := os.WriteFile(sessionsFile, data, 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	// Presenting one account's real entry as another account's, and one
-	// terminal's as another's.
-	{
-		if code := read(victim, sessionKey, false); code != 0 {
-			t.Fatalf("creating a session: exit code %d", code)
-		}
-		store := loadStore()
-		for _, acct := range env.testDB.Accounts {
-			if acct.UUID != accountUUID {
-				store.Sessions[sessionKey+":"+acct.UUID] = store.Sessions[entryKey]
-				writeStore(store)
-				if code := read(acct, sessionKey, true); code != exitAuthRefused {
-					t.Errorf("session copied to account %s: expected exit code %d, got %d", acct.Shorthand, exitAuthRefused, code)
-				}
-			}
-		}
-		store.Sessions["some-other-terminal:"+accountUUID] = store.Sessions[entryKey]
-		writeStore(store)
-		if code := read(victim, "some-other-terminal", true); code != exitAuthRefused {
-			t.Errorf("session copied to another terminal: expected exit code %d, got %d", exitAuthRefused, code)
-		}
+	if code := read(true); code != exitAuthRefused {
+		t.Errorf("approval with edited last_access: expected exit code %d, got %d", exitAuthRefused, code)
 	}
 }
 

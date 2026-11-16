@@ -77,7 +77,9 @@ func cmdSSHSign(args []string, accountFlag string) error {
 		return err
 	}
 	defer aks.Close()
-	aks.pendingRefs = []string{ref}
+	if err := aks.authorizeRefs(ref); err != nil {
+		return err
+	}
 	privkey, err := resolveRef(aks, ref, nil)
 	if err != nil {
 		return err

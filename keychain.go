@@ -67,7 +67,7 @@ static SecAccessRef createAppOnlyAccess(const char *label) {
 #pragma clang diagnostic pop
 
 // Defined in touchid.m, linked via libtouchid.a
-extern int authenticateTouchID(const char *reason, const char *refsText,
+extern int authenticateTouchID(const char *reason, const char *payloadJSON,
                                const void *iconPNG, int iconPNGLen);
 
 // Add or update a keychain item with app-only access.
@@ -503,44 +503,14 @@ var dockIconPNG []byte
 // wrapper (_git-sign in Jeremy's dev env) commits unsigned on it.
 var ErrAuthRefused = errors.New("authentication failed or cancelled")
 
-// AuthenticateBiometric prompts for Touch ID or password using LAContext.
-// When refs is non-empty, a context window is shown alongside the system
-// TouchID dialog listing the op:// references being authenticated for.
-func AuthenticateBiometric(reason string, refs []string) error {
-	cReason := C.CString(reason)
-	defer C.free(unsafe.Pointer(cReason))
-
-	refsText := formatBiometricRefs(refs)
-	cRefs := C.CString(refsText)
-	defer C.free(unsafe.Pointer(cRefs))
-
-	rc := C.authenticateTouchID(cReason, cRefs,
-		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
-	if rc != 0 {
-		return ErrAuthRefused
-	}
-	return nil
-}
-
-// formatBiometricRefs groups refs by vault ("[account:]vault") and emits a
-// JSON payload that the ObjC side (touchid.m) consumes to render the
-// authorization window. Returns "" when refs is empty (suppresses the
-// window entirely).
+// AuthenticateBiometric prompts for Touch ID (or its password fallback) to
+// approve reading refs, which are listed in a window around the prompt.
 //
-// Input refs look like "op://[account:]vault/item/[section/]field". We split
-// on the first '/' after "op://" to separate "[account:]vault" (the group
-// key) from the rest (the display string within the group). Refs that don't
-// start with "op://" fall into a single empty-key group — shouldn't happen
-// but we're defensive.
-//
-// JSON shape:
-//
-//	{"command":"claude deploy.sh","tty":"ttys003","groups":[
-//	  {"vault":"Employee","refs":["Item A/field", ...]}, ...
-//	]}
-func formatBiometricRefs(refs []string) string {
+// Refs look like "op://[account:]vault/item/[section/]field". The window
+// groups them by "[account:]vault": everything up to the first '/'.
+func AuthenticateBiometric(refs []string) error {
 	if len(refs) == 0 {
-		return ""
+		panic("AuthenticateBiometric: nothing to approve")
 	}
 	type group struct {
 		Vault string   `json:"vault"`
@@ -568,20 +538,43 @@ func formatBiometricRefs(refs []string) string {
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Vault < groups[j].Vault })
-	payload := struct {
-		Command string   `json:"command"`
-		TTY     string   `json:"tty"`
-		Groups  []*group `json:"groups"`
-	}{
-		Command: describeInvokingCommand(),
-		TTY:     shortTTYName(),
-		Groups:  groups,
-	}
+	return touchID("access your 1Password credentials", map[string]any{"groups": groups})
+}
+
+// AuthenticateBiometricEverything prompts for Touch ID to approve reading
+// every item of the given accounts (named however the user should see them).
+// The window says so, and looks unlike the one for individual refs.
+func AuthenticateBiometricEverything(accounts []string) error {
+	return touchID("read every item in your 1Password vaults", map[string]any{"everything": accounts})
+}
+
+// touchID shows the Touch ID prompt inside the authorization window that
+// touchid.m draws from payload, to which it adds who is asking:
+//
+//	{"command":"claude deploy.sh","tty":"ttys003",
+//	 "groups":[{"vault":"Employee","refs":["Item A/field", ...]}, ...]}
+//
+// or, for access to everything, "everything":["account", ...] in place of
+// "groups". reason is the text macOS shows if it falls back to its own dialog.
+func touchID(reason string, payload map[string]any) error {
+	payload["command"] = describeInvokingCommand()
+	payload["tty"] = shortTTYName()
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return ""
+		return err
 	}
-	return string(data)
+
+	cReason := C.CString(reason)
+	defer C.free(unsafe.Pointer(cReason))
+	cPayload := C.CString(string(data))
+	defer C.free(unsafe.Pointer(cPayload))
+
+	rc := C.authenticateTouchID(cReason, cPayload,
+		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
+	if rc != 0 {
+		return ErrAuthRefused
+	}
+	return nil
 }
 
 // splitVaultAndDisplay separates an op:// ref into its "[account:]vault"

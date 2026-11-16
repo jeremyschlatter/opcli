@@ -36,15 +36,27 @@ const (
 	sessionAbsoluteMax   = 12 * time.Hour
 )
 
-type Session struct {
-	AccountID  string    `json:"account_id"`
-	Created    time.Time `json:"created"`
-	LastAccess time.Time `json:"last_access"`
-	MAC        string    `json:"mac"` // HMAC of session data, verified using Keychain secret
+// A Grant is one thing a command needs to read: usually a single op:// ref.
+// Touch ID approves grants, not accounts or vaults: approving one says nothing
+// about any other.
+type Grant struct {
+	Key string // identifies exactly what is read; this is what an approval covers
+	Ref string // how the Touch ID prompt shows it, as op://group/rest
 }
 
+// An Approval records that Touch ID was given for one grant in one terminal
+// session. It lapses after sessionInactivityMax without the grant being used,
+// and sessionAbsoluteMax after it was given.
+type Approval struct {
+	Created    time.Time `json:"created"`
+	LastAccess time.Time `json:"last_access"`
+	MAC        string    `json:"mac"` // see approvalMAC
+}
+
+// SessionStore is the contents of sessions.json. Any process running as the
+// user can write that file, so an approval only counts if its MAC checks out.
 type SessionStore struct {
-	Sessions map[string]*Session `json:"sessions"`
+	Approvals map[string]*Approval `json:"approvals"` // keyed by approvalID
 }
 
 // testDataDir can be set by test builds to override the data directory.
@@ -167,7 +179,7 @@ func loadSessions() (*SessionStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &SessionStore{Sessions: make(map[string]*Session)}, nil
+			return &SessionStore{Approvals: make(map[string]*Approval)}, nil
 		}
 		return nil, err
 	}
@@ -177,25 +189,41 @@ func loadSessions() (*SessionStore, error) {
 		return nil, fmt.Errorf("failed to parse session store: %w", err)
 	}
 
-	if store.Sessions == nil {
-		store.Sessions = make(map[string]*Session)
+	if store.Approvals == nil {
+		store.Approvals = make(map[string]*Approval)
 	}
 
 	return &store, nil
 }
 
-func saveSessions(store *SessionStore) error {
+// updateSessions applies update to the session store on disk. It holds a
+// lock meanwhile: opcli processes often run side by side, and one working
+// from a stale copy of the store would drop the others' approvals.
+func updateSessions(update func(*SessionStore)) error {
 	path, err := getSessionPath()
 	if err != nil {
 		return err
 	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() // which unlocks
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
 
-	// Clean expired sessions before saving
+	store, err := loadSessions()
+	if err != nil {
+		return err
+	}
+	update(store)
+
 	now := time.Now()
-	for key, session := range store.Sessions {
-		if now.Sub(session.LastAccess) > sessionInactivityMax ||
-			now.Sub(session.Created) > sessionAbsoluteMax {
-			delete(store.Sessions, key)
+	for id, a := range store.Approvals {
+		if now.Sub(a.LastAccess) > sessionInactivityMax ||
+			now.Sub(a.Created) > sessionAbsoluteMax {
+			delete(store.Approvals, id)
 		}
 	}
 
@@ -203,8 +231,7 @@ func saveSessions(store *SessionStore) error {
 	if err != nil {
 		return err
 	}
-
-	// Atomic write: write to temp file then rename
+	// Atomic write, so that readers (who don't take the lock) never see half a file.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
@@ -212,102 +239,90 @@ func saveSessions(store *SessionStore) error {
 	return os.Rename(tmp, path)
 }
 
-// computeSessionMAC computes HMAC for session data using the Keychain secret.
-// It covers both timestamps: an unauthenticated LastAccess would let anyone
-// who can write sessions.json keep a session alive for the full 12 hours.
-func computeSessionMAC(secret []byte, sessionKey string, session *Session) string {
+// approvalID is the key of the approval of grantKey in the terminal session
+// sessionKey. It is a MAC rather than the two strings themselves so that
+// sessions.json doesn't list the names of everything you've read lately.
+func approvalID(secret []byte, sessionKey, grantKey string) string {
 	h := hmac.New(sha256.New, secret)
-	h.Write([]byte(fmt.Sprintf("%s:%s:%d:%d", sessionKey, session.AccountID, session.Created.UnixNano(), session.LastAccess.UnixNano())))
+	fmt.Fprintf(h, "id:%d:%s%s", len(sessionKey), sessionKey, grantKey)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// GetValidSession returns a valid session for the current TTY and account, or nil if none exists.
-func GetValidSession(accountID string) (*Session, error) {
-	sessionKey, err := getSessionKey()
-	if err != nil {
-		return nil, err
-	}
-
-	store, err := loadSessions()
-	if err != nil {
-		return nil, err
-	}
-
-	key := sessionKey + ":" + accountID
-	session, ok := store.Sessions[key]
-	if !ok {
-		return nil, nil
-	}
-
-	// Verify MAC using Keychain secret (only opcli can read this)
-	secret, err := GetSessionSecret()
-	if err != nil {
-		return nil, err
-	}
-	if session.AccountID != accountID || !hmac.Equal([]byte(session.MAC), []byte(computeSessionMAC(secret, sessionKey, session))) {
-		// Invalid MAC - session was forged or corrupted
-		delete(store.Sessions, key)
-		saveSessions(store)
-		return nil, nil
-	}
-
-	now := time.Now()
-
-	// Check inactivity timeout (10 minutes)
-	if now.Sub(session.LastAccess) > sessionInactivityMax {
-		delete(store.Sessions, key)
-		saveSessions(store)
-		return nil, nil
-	}
-
-	// Check absolute timeout (12 hours)
-	if now.Sub(session.Created) > sessionAbsoluteMax {
-		delete(store.Sessions, key)
-		saveSessions(store)
-		return nil, nil
-	}
-
-	// Update last access time and recompute MAC
-	session.LastAccess = now
-	session.MAC = computeSessionMAC(secret, sessionKey, session)
-	if err := saveSessions(store); err != nil {
-		// Non-fatal, session still valid
-	}
-
-	return session, nil
+// approvalMAC authenticates an approval. It covers both timestamps: an
+// unauthenticated LastAccess would let anyone who can write sessions.json keep
+// an approval alive for the full 12 hours.
+func approvalMAC(secret []byte, id string, a *Approval) string {
+	h := hmac.New(sha256.New, secret)
+	fmt.Fprintf(h, "mac:%s:%d:%d", id, a.Created.UnixNano(), a.LastAccess.UnixNano())
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-// CreateSession creates a new session for the current TTY.
-func CreateSession(accountID string) (*Session, error) {
-	sessionKey, err := getSessionKey()
-	if err != nil {
-		return nil, err
+// Authorize makes sure every grant is approved for the current terminal
+// session, asking for Touch ID for the ones that aren't. The prompt lists
+// exactly the grants it is approving.
+func Authorize(grants []Grant) error {
+	if len(grants) == 0 {
+		return nil
 	}
 
-	store, err := loadSessions()
-	if err != nil {
-		return nil, err
+	// Without a terminal there is nothing to scope an approval to: ask every time.
+	sessionKey, sessionKeyErr := getSessionKey()
+	if sessionKeyErr != nil {
+		var refs []string
+		for _, g := range grants {
+			refs = append(refs, g.Ref)
+		}
+		if err := AuthenticateBiometric(refs); err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: Touch ID will be needed again next time: %v\n", sessionKeyErr)
+		return nil
 	}
 
-	// Get or create session secret from Keychain
 	secret, err := GetSessionSecret()
 	if err != nil {
-		return nil, err
+		return err
+	}
+	store, err := loadSessions()
+	if err != nil {
+		return err
 	}
 
+	// Entries of the store as it should be once this is done: the approvals
+	// in use, freshened, and those that Touch ID is about to give.
 	now := time.Now()
-	session := &Session{
-		AccountID:  accountID,
-		Created:    now,
-		LastAccess: now,
+	approvals := map[string]*Approval{}
+	var unapproved []Grant
+	for _, g := range grants {
+		id := approvalID(secret, sessionKey, g.Key)
+		a, ok := store.Approvals[id]
+		if ok && hmac.Equal([]byte(a.MAC), []byte(approvalMAC(secret, id, a))) &&
+			now.Sub(a.LastAccess) <= sessionInactivityMax && now.Sub(a.Created) <= sessionAbsoluteMax {
+			a.LastAccess = now
+			approvals[id] = a
+		} else {
+			unapproved = append(unapproved, g)
+		}
 	}
-	session.MAC = computeSessionMAC(secret, sessionKey, session)
 
-	store.Sessions[sessionKey+":"+accountID] = session
-
-	if err := saveSessions(store); err != nil {
-		return nil, err
+	if len(unapproved) > 0 {
+		var refs []string
+		for _, g := range unapproved {
+			refs = append(refs, g.Ref)
+		}
+		if err := AuthenticateBiometric(refs); err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
+		now := time.Now() // the prompt may have been up for a while
+		for _, g := range unapproved {
+			approvals[approvalID(secret, sessionKey, g.Key)] = &Approval{Created: now, LastAccess: now}
+		}
 	}
 
-	return session, nil
+	return updateSessions(func(store *SessionStore) {
+		for id, a := range approvals {
+			a.MAC = approvalMAC(secret, id, a)
+			store.Approvals[id] = a
+		}
+	})
 }

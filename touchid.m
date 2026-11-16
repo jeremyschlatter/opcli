@@ -6,8 +6,14 @@
 //   - vault-grouped list of op:// refs in a bordered box; the field (last
 //     segment) of each ref is highlighted in the accent color so the reader
 //     can scan for "what's being read"
-//   - a footer caption noting that approval opens a 10-minute session
+//   - a footer caption noting how long those refs stay approved
 //   - Cancel button · "Authorize with Touch ID" label · LAAuthenticationView
+//
+// Approval covers the listed refs and nothing else. The one request that
+// isn't a list of refs is for everything (`opcli plugin init`). It gets the
+// same layout in a warning color, so that it can't be mistaken for the usual
+// prompt: a stripe across the top, "full access requested", and a box naming
+// the accounts whose every item will be read.
 //
 // The window is chromeless (titlebar hidden) and uses a warm neutral dark
 // panel. LAAuthenticationView renders Apple's fingerprint glyph inline — we
@@ -16,10 +22,13 @@
 // Payload (JSON, passed from Go):
 //   {"command":"claude deploy.sh", "tty":"ttys003",
 //    "groups":[{"vault":"Employee","refs":["item/field", ...]}, ...]}
+// or, for everything:
+//   {"command":"opcli plugin init gh", "tty":"ttys003",
+//    "everything":["my", "work"]}
 //
 // Fallback: if biometrics aren't available the inline-window path is
 // skipped entirely and we use the classic LAContext.evaluatePolicy
-// dispatch-semaphore flow — no custom window, unstyled, but functional.
+// flow — no custom window, unstyled, but functional.
 
 #import <AppKit/AppKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
@@ -54,6 +63,10 @@ static NSColor *colorText(void)         { return [NSColor colorWithSRGBRed:0.957
 static NSColor *colorTextDim(void)      { return [NSColor colorWithSRGBRed:0.655 green:0.624 blue:0.573 alpha:1.0]; }
 static NSColor *colorTextFaint(void)    { return [NSColor colorWithSRGBRed:0.420 green:0.396 blue:0.357 alpha:1.0]; }
 static NSColor *colorAccent(void)       { return [NSColor colorWithSRGBRed:0.171 green:0.799 blue:0.922 alpha:1.0]; } // oklch(0.78 0.13 215)
+
+// Full-access requests only.
+static NSColor *colorWarn(void)         { return [NSColor colorWithSRGBRed:1.000 green:0.478 blue:0.271 alpha:1.0]; } // #ff7a45
+static NSColor *colorWarnBox(void)      { return [NSColor colorWithSRGBRed:0.180 green:0.094 blue:0.063 alpha:1.0]; } // #2e1810
 
 static NSFont *fontUI(CGFloat sz, NSFontWeight w)   { return [NSFont systemFontOfSize:sz weight:w]; }
 static NSFont *fontMono(CGFloat sz, NSFontWeight w) { return [NSFont monospacedSystemFontOfSize:sz weight:w]; }
@@ -90,8 +103,9 @@ static NSAttributedString *renderRefAttr(NSString *ref) {
 
 // Header: "opcli · access requested" title + optional monospace sub-line
 // "$ <command>  ·  <tty>". Either command or tty may be empty; the sub-line
-// is suppressed if both are.
-static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width) {
+// is suppressed if both are. For everything, the title says so, in the
+// warning color.
+static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width, BOOL everything) {
     OpcliFlippedView *v = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,width,0)];
 
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
@@ -103,9 +117,9 @@ static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width) {
         NSFontAttributeName: fontUI(15, NSFontWeightRegular),
         NSForegroundColorAttributeName: colorTextFaint(),
     }]];
-    [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"access requested" attributes:@{
-        NSFontAttributeName: fontUI(15, NSFontWeightMedium),
-        NSForegroundColorAttributeName: colorTextDim(),
+    [title appendAttributedString:[[NSAttributedString alloc] initWithString:(everything ? @"full access requested" : @"access requested") attributes:@{
+        NSFontAttributeName: fontUI(15, everything ? NSFontWeightBold : NSFontWeightMedium),
+        NSForegroundColorAttributeName: everything ? colorWarn() : colorTextDim(),
     }]];
     NSTextField *titleField = [NSTextField labelWithAttributedString:title];
     [titleField setFrame:NSMakeRect(0, 0, width, 20)];
@@ -257,9 +271,55 @@ static NSView *buildSecretsBox(NSArray *groups, CGFloat width) {
     return box;
 }
 
-// Footer caption: "Also grants this terminal 10 min of unprompted access to
-// any secret." "10 min" is emphasized slightly so the duration pops.
-static NSView *buildFooterCaption(CGFloat contentW) {
+// The box for a request for everything, in place of the list of refs: a
+// warning-colored box saying so, with one row per account.
+static NSView *buildEverythingBox(NSArray *accounts, CGFloat width) {
+    OpcliFlippedView *box = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,width,0)];
+    [box setWantsLayer:YES];
+    [box.layer setBackgroundColor:[colorWarnBox() CGColor]];
+    [box.layer setBorderColor:[colorWarn() CGColor]];
+    [box.layer setBorderWidth:1.5];
+    [box.layer setCornerRadius:10.0];
+
+    CGFloat hPad = 14;
+    CGFloat y = 14;
+
+    NSTextField *headline = [NSTextField labelWithAttributedString:
+        [[NSAttributedString alloc] initWithString:@"⚠  Every item in every vault" attributes:@{
+            NSFontAttributeName: fontUI(16, NSFontWeightBold),
+            NSForegroundColorAttributeName: colorWarn(),
+        }]];
+    [headline setFrame:NSMakeRect(hPad, y, width - 2*hPad, 22)];
+    [box addSubview:headline];
+    y += 22 + 8;
+
+    for (id account in accounts) {
+        if (![account isKindOfClass:[NSString class]]) continue;
+        NSMutableAttributedString *row = [[NSMutableAttributedString alloc] init];
+        [row appendAttributedString:[[NSAttributedString alloc] initWithString:@"account " attributes:@{
+            NSFontAttributeName: fontMono(12, NSFontWeightRegular),
+            NSForegroundColorAttributeName: colorTextDim(),
+        }]];
+        [row appendAttributedString:[[NSAttributedString alloc] initWithString:account attributes:@{
+            NSFontAttributeName: fontMono(12, NSFontWeightSemibold),
+            NSForegroundColorAttributeName: colorText(),
+        }]];
+        NSTextField *rowField = [NSTextField labelWithAttributedString:row];
+        [rowField setLineBreakMode:NSLineBreakByTruncatingTail];
+        [rowField setFrame:NSMakeRect(hPad, y, width - 2*hPad, 18)];
+        [box addSubview:rowField];
+        y += 18 + 2;
+    }
+    y += 10;
+
+    [box setFrame:NSMakeRect(0, 0, width, y)];
+    return box;
+}
+
+// Footer caption: "Stays approved for this terminal until unused for 10 min."
+// "10 min" is emphasized slightly so the duration pops. Access to everything
+// is never kept: its caption says that instead.
+static NSView *buildFooterCaption(CGFloat contentW, BOOL everything) {
     NSDictionary *faint = @{
         NSFontAttributeName: fontMono(11, NSFontWeightRegular),
         NSForegroundColorAttributeName: colorTextFaint(),
@@ -269,9 +329,14 @@ static NSView *buildFooterCaption(CGFloat contentW) {
         NSForegroundColorAttributeName: colorTextDim(),
     };
     NSMutableAttributedString *a = [[NSMutableAttributedString alloc] init];
-    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"Also grants this terminal " attributes:faint]];
-    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"10 min" attributes:emph]];
-    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@" of unprompted access to any secret." attributes:faint]];
+    if (everything) {
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"This once" attributes:emph]];
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@", for this command only. Nothing stays approved." attributes:faint]];
+    } else {
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"Stays approved for this terminal until unused for " attributes:faint]];
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"10 min" attributes:emph]];
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@". Covers nothing else." attributes:faint]];
+    }
 
     NSTextField *f = [NSTextField wrappingLabelWithString:@""];
     [f setAttributedStringValue:a];
@@ -328,14 +393,15 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     NSString *command = payload[@"command"]; if (![command isKindOfClass:[NSString class]]) command = @"";
     NSString *tty     = payload[@"tty"];     if (![tty     isKindOfClass:[NSString class]]) tty = @"";
     NSArray  *groups  = payload[@"groups"];  if (![groups  isKindOfClass:[NSArray  class]]) groups = @[];
+    NSArray  *everything = payload[@"everything"]; if (![everything isKindOfClass:[NSArray class]]) everything = nil;
 
     CGFloat w = 440;
     CGFloat hPad = 22;
     CGFloat contentW = w - 2*hPad;
 
-    NSView *header     = buildHeader(command, tty, contentW);
-    NSView *secretsBox = buildSecretsBox(groups, contentW);
-    NSView *caption    = buildFooterCaption(contentW);
+    NSView *header     = buildHeader(command, tty, contentW, everything != nil);
+    NSView *secretsBox = everything ? buildEverythingBox(everything, contentW) : buildSecretsBox(groups, contentW);
+    NSView *caption    = buildFooterCaption(contentW, everything != nil);
     NSView *authRow    = buildAuthRow(authView, cancelTarget, w);
 
     CGFloat headerH  = header.frame.size.height;
@@ -343,7 +409,8 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     CGFloat captionH = caption.frame.size.height;
     CGFloat authRowH = authRow.frame.size.height;
 
-    CGFloat topPad         = 20;
+    CGFloat stripeH        = everything ? 6 : 0;
+    CGFloat topPad         = 20 + stripeH;
     CGFloat bottomPad      = 16;
     CGFloat gapHeadBox     = 14;
     CGFloat gapBoxCaption  = 14;
@@ -373,6 +440,13 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     [root setWantsLayer:YES];
     [root.layer setBackgroundColor:[colorPanel() CGColor]];
     [win setContentView:root];
+
+    if (everything) {
+        NSView *stripe = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, stripeH)];
+        [stripe setWantsLayer:YES];
+        [stripe.layer setBackgroundColor:[colorWarn() CGColor]];
+        [root addSubview:stripe];
+    }
 
     CGFloat y = topPad;
     [header setFrameOrigin:NSMakePoint(hPad, y)];      [root addSubview:header];     y += headerH + gapHeadBox;
@@ -451,35 +525,13 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
 }
 @end
 
-// C interface for Go.
-// If refsText is non-NULL and non-empty, an inline authorization window is
-// shown. Otherwise, only the standard system prompt appears (no window).
-// iconPNG/iconPNGLen carry the app logo, shown in the Dock while the
-// authorization window is up.
-int authenticateTouchID(const char *reason, const char *refsText,
+// C interface for Go. payloadJSON says what is being approved (see the top of
+// this file). iconPNG/iconPNGLen carry the app logo, shown in the Dock while
+// the authorization window is up.
+int authenticateTouchID(const char *reason, const char *payloadJSON,
                         const void *iconPNG, int iconPNGLen) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
-        BOOL showWindow = (refsText != NULL && refsText[0] != '\0');
-
-        if (!showWindow) {
-            LAContext *context = [[LAContext alloc] init];
-            dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-            __block BOOL success = NO;
-            LAPolicy policy = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
-            NSError *error = nil;
-            if (![context canEvaluatePolicy:policy error:&error]) {
-                policy = LAPolicyDeviceOwnerAuthentication;
-            }
-            [context evaluatePolicy:policy
-                    localizedReason:reasonStr
-                              reply:^(BOOL result, NSError *authError) {
-                success = result;
-                dispatch_semaphore_signal(sema);
-            }];
-            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-            return success ? 0 : 1;
-        }
 
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -489,7 +541,7 @@ int authenticateTouchID(const char *reason, const char *refsText,
 
         OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
         delegate.reason = reasonStr;
-        delegate.payloadJSON = [NSString stringWithUTF8String:refsText];
+        delegate.payloadJSON = [NSString stringWithUTF8String:payloadJSON];
         [NSApp setDelegate:delegate];
         [NSApp run];
 
