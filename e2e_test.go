@@ -506,6 +506,28 @@ func TestE2E_PluginRun(t *testing.T) {
 		}
 	}
 
+	// unauthenticated_parents: run by a listed program (here, this test
+	// binary), the executable gets no credential. Other parents still do.
+	{
+		path := filepath.Join(globalDir, "github.json")
+		original, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for parent, want := range map[string]string{filepath.Base(os.Args[0]): "token= args=api\n", "someone-else": "token=api-key-12345 args=api\n"} {
+			config := strings.Replace(string(original), "{", fmt.Sprintf(`{"unauthenticated_parents": [%q], `, parent), 1)
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, stderr, code := run(workDir, "gh", "api"); out != want || code != 7 {
+				t.Errorf("gh with unauthenticated_parents [%s]: out=%q stderr=%q code=%d", parent, out, stderr, code)
+			}
+		}
+		if err := os.WriteFile(path, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// A plugin's executables share its config: fly and flyctl are both the flyctl plugin's.
 	writeConfig(globalDir, "flyctl", "access_token", "Test API Key", `{"Token": "credential"}`)
 	for _, exe := range []string{"fly", "flyctl"} {

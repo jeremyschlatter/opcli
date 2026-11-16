@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 	"github.com/1Password/shell-plugins/sdk"
 	"github.com/1Password/shell-plugins/sdk/schema"
 	"github.com/AlecAivazis/survey/v2"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -35,6 +37,13 @@ import (
 type pluginConfig struct {
 	AccountID   string             `json:"account_id"`
 	Credentials []pluginCredential `json:"credentials"`
+
+	// opcli extension, edited by hand (`plugin init` doesn't set it). Run by
+	// one of these programs (matched against the base name of the parent
+	// process's argv[0], eg "claude"), the executable gets no credential and
+	// 1Password isn't touched. For programs that probe a CLI in the
+	// background, which would otherwise mean a Touch ID prompt out of nowhere.
+	UnauthenticatedParents []string `json:"unauthenticated_parents,omitempty"`
 }
 
 type pluginCredential struct {
@@ -374,6 +383,22 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 			fmt.Println()
 		} else {
 			return 0, fmt.Errorf("no credential configured for %s (run `opcli plugin init %s`)", name, name)
+		}
+		if len(config.UnauthenticatedParents) > 0 {
+			// kern.procargs2 is: argc, the executable's path, NUL padding, argv[0], ...
+			procArgs, err := unix.SysctlRaw("kern.procargs2", os.Getppid())
+			if err != nil {
+				return 0, fmt.Errorf("reading the parent process's arguments: %w", err)
+			}
+			parts := strings.SplitN(string(procArgs[4:]), "\x00", 2)
+			parent, _, _ := strings.Cut(strings.TrimLeft(parts[1], "\x00"), "\x00")
+			if slices.Contains(config.UnauthenticatedParents, filepath.Base(parent)) {
+				binary, err := pluginLookPath(name)
+				if err != nil {
+					return 0, err
+				}
+				return 0, syscall.Exec(binary, cmdArgs, os.Environ())
+			}
 		}
 		cred := config.Credentials[0]
 		if cred.Plugin != credType.pluginName || cred.CredentialType != credType.Name.ID().String() {

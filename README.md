@@ -121,6 +121,15 @@ and finds the real executable further along the `PATH`.
 The chosen item is used for the current terminal session, a directory tree
 (`.opcli/plugins/` in it), or globally (`~/.opcli/plugins/`).
 
+Some programs run a CLI in the background (Claude Code checks `gh auth token`
+every time it starts), which through a shim means a Touch ID prompt out of
+nowhere. To have the CLI run without its credential when one of those is the
+parent process, list them in the plugin's config file by hand:
+
+```json
+"unauthenticated_parents": ["claude"]
+```
+
 Differences from `op`:
 
 - opcli is read-only, so `init` can't import a credential into 1Password or
