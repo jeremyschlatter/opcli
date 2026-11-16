@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -415,6 +420,115 @@ func TestE2E_TouchIDFail(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "authentication failed or cancelled") {
 		t.Errorf("expected the auth failure message, got stderr: %s", stderr)
+	}
+}
+
+// sessions.json is writable by any process running as the user, so an entry
+// only counts if its MAC checks out against the secret in the keychain.
+// OPCLI_TEST_TOUCHID_FAIL makes "this session was accepted" observable: the
+// read succeeds only if no Touch ID prompt was needed.
+func TestE2E_SessionTampering(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+	sessionsFile := filepath.Join(env.dataDir, "sessions.json")
+	const sessionKey = "session-tampering-test"
+
+	// read reads something from acct on the given terminal session, and
+	// returns the exit code.
+	read := func(acct *TestAccount, sessionKey string, touchIDFails bool) int {
+		ref, err := firstReadableRef(acct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extraEnv := map[string]string{"OPCLI_TEST_SESSION_KEY": sessionKey}
+		if touchIDFails {
+			extraEnv["OPCLI_TEST_TOUCHID_FAIL"] = "1"
+		}
+		_, _, code := env.runCLI("", "", extraEnv, "read", ref)
+		return code
+	}
+	victim := env.testDB.Accounts[0]
+	accountUUID := victim.UUID
+	entryKey := sessionKey + ":" + accountUUID
+	loadStore := func() (store SessionStore) {
+		data, err := os.ReadFile(sessionsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &store); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	writeStore := func(store SessionStore) {
+		data, err := json.Marshal(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sessionsFile, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An entry MAC'd the way opcli used to do it, with a "secret" derived
+	// from the account UUIDs, which anyone can read out of sessions.json.
+	{
+		oldSecret := make([]byte, 32)
+		for _, acct := range env.testDB.Accounts {
+			for i, b := range []byte(acct.UUID) {
+				oldSecret[i%32] ^= b
+			}
+		}
+		now := time.Now()
+		h := hmac.New(sha256.New, oldSecret)
+		fmt.Fprintf(h, "%s:%s:%d", sessionKey, accountUUID, now.Unix())
+		writeStore(SessionStore{Sessions: map[string]*Session{entryKey: {
+			AccountID: accountUUID, Created: now, LastAccess: now, MAC: hex.EncodeToString(h.Sum(nil)),
+		}}})
+		if code := read(victim, sessionKey, true); code != exitAuthRefused {
+			t.Errorf("forged session: expected exit code %d, got %d", exitAuthRefused, code)
+		}
+	}
+
+	// A real session, for contrast and as raw material for the rest.
+	if code := read(victim, sessionKey, false); code != 0 {
+		t.Fatalf("creating a session: exit code %d", code)
+	}
+	if code := read(victim, sessionKey, true); code != 0 {
+		t.Fatalf("a real session should not need Touch ID, got exit code %d", code)
+	}
+
+	// Moving a real entry's timestamps (to outlive the inactivity timeout).
+	{
+		store := loadStore()
+		store.Sessions[entryKey].LastAccess = store.Sessions[entryKey].LastAccess.Add(time.Minute)
+		writeStore(store)
+		if code := read(victim, sessionKey, true); code != exitAuthRefused {
+			t.Errorf("session with edited last_access: expected exit code %d, got %d", exitAuthRefused, code)
+		}
+	}
+
+	// Presenting one account's real entry as another account's, and one
+	// terminal's as another's.
+	{
+		if code := read(victim, sessionKey, false); code != 0 {
+			t.Fatalf("creating a session: exit code %d", code)
+		}
+		store := loadStore()
+		for _, acct := range env.testDB.Accounts {
+			if acct.UUID != accountUUID {
+				store.Sessions[sessionKey+":"+acct.UUID] = store.Sessions[entryKey]
+				writeStore(store)
+				if code := read(acct, sessionKey, true); code != exitAuthRefused {
+					t.Errorf("session copied to account %s: expected exit code %d, got %d", acct.Shorthand, exitAuthRefused, code)
+				}
+			}
+		}
+		store.Sessions["some-other-terminal:"+accountUUID] = store.Sessions[entryKey]
+		writeStore(store)
+		if code := read(victim, "some-other-terminal", true); code != exitAuthRefused {
+			t.Errorf("session copied to another terminal: expected exit code %d, got %d", exitAuthRefused, code)
+		}
 	}
 }
 

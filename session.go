@@ -213,9 +213,11 @@ func saveSessions(store *SessionStore) error {
 }
 
 // computeSessionMAC computes HMAC for session data using the Keychain secret.
-func computeSessionMAC(secret []byte, sessionKey, accountID string, created time.Time) string {
+// It covers both timestamps: an unauthenticated LastAccess would let anyone
+// who can write sessions.json keep a session alive for the full 12 hours.
+func computeSessionMAC(secret []byte, sessionKey string, session *Session) string {
 	h := hmac.New(sha256.New, secret)
-	h.Write([]byte(fmt.Sprintf("%s:%s:%d", sessionKey, accountID, created.Unix())))
+	h.Write([]byte(fmt.Sprintf("%s:%s:%d:%d", sessionKey, session.AccountID, session.Created.UnixNano(), session.LastAccess.UnixNano())))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -242,8 +244,7 @@ func GetValidSession(accountID string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	expectedMAC := computeSessionMAC(secret, sessionKey, session.AccountID, session.Created)
-	if session.MAC != expectedMAC {
+	if session.AccountID != accountID || !hmac.Equal([]byte(session.MAC), []byte(computeSessionMAC(secret, sessionKey, session))) {
 		// Invalid MAC - session was forged or corrupted
 		delete(store.Sessions, key)
 		saveSessions(store)
@@ -268,6 +269,7 @@ func GetValidSession(accountID string) (*Session, error) {
 
 	// Update last access time and recompute MAC
 	session.LastAccess = now
+	session.MAC = computeSessionMAC(secret, sessionKey, session)
 	if err := saveSessions(store); err != nil {
 		// Non-fatal, session still valid
 	}
@@ -299,7 +301,7 @@ func CreateSession(accountID string) (*Session, error) {
 		Created:    now,
 		LastAccess: now,
 	}
-	session.MAC = computeSessionMAC(secret, sessionKey, accountID, now)
+	session.MAC = computeSessionMAC(secret, sessionKey, session)
 
 	store.Sessions[sessionKey+":"+accountID] = session
 

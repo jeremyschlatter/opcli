@@ -207,6 +207,7 @@ static OSStatus keychainDelete(const char *service, const char *account) {
 */
 import "C"
 import (
+	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -230,6 +231,8 @@ const keychainCredentials = "credentials"
 type CredentialStore struct {
 	Accounts map[string]*StoredAccount `json:"accounts"` // keyed by account UUID
 	Default  string                    `json:"default"`  // UUID of default account
+
+	SessionSecret string `json:"session_secret,omitempty"` // base64 HMAC key for sessions.json; see GetSessionSecret
 }
 
 // StoredAccount holds credentials for a single account.
@@ -726,23 +729,26 @@ func DeleteAllCredentials() error {
 	return keychainDelete(keychainCredentials)
 }
 
-// GetSessionSecret retrieves or creates a session secret for HMAC verification.
-// Uses a fixed key since all accounts share the same keychain entry.
+// GetSessionSecret returns the key that authenticates entries in sessions.json,
+// creating it on first use. It is random and lives in the credential store, so
+// it sits behind the same app-only keychain ACL as the account passwords:
+// forging a session takes the same access as reading the passwords directly.
 func GetSessionSecret() ([]byte, error) {
 	store, err := loadCredentialStore()
 	if err != nil {
 		return nil, err
 	}
-
-	// Use a hash of all account UUIDs as the secret base
-	// This changes if accounts change, invalidating old sessions
-	h := make([]byte, 32)
-	for uuid := range store.Accounts {
-		for i, b := range []byte(uuid) {
-			h[i%32] ^= b
+	if store.SessionSecret == "" {
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, err
+		}
+		store.SessionSecret = base64.StdEncoding.EncodeToString(secret)
+		if err := saveCredentialStore(store); err != nil {
+			return nil, err
 		}
 	}
-	return h, nil
+	return base64.StdEncoding.DecodeString(store.SessionSecret)
 }
 
 // ExtractShorthand extracts the shorthand from a sign-in URL.
