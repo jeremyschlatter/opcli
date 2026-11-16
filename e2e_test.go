@@ -505,6 +505,38 @@ func TestE2E_ApprovalScope(t *testing.T) {
 	}
 }
 
+// Approvals are given to the nearest coding agent among opcli's ancestors:
+// what one run of an agent was approved for, another has to ask for again.
+// The agents here are shells running under the name "claude".
+func TestE2E_AgentScope(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+	promptLog := filepath.Join(env.tmpDir, "prompts")
+
+	// agent runs a fake agent that reads the same ref twice, and returns
+	// the Touch ID prompts that resulted.
+	agent := func() string {
+		os.Remove(promptLog)
+		cmd := exec.Command("/bin/sh", "-c", `exec -a claude /bin/sh -c '"$0" read "$1" && "$0" read "$1"; exit $?' "$0" "$1"`,
+			env.binPath, "op://Private/Test Login/password")
+		cmd.Env = append(env.baseEnv(), "OPCLI_TEST_SESSION_KEY=", "OPCLI_TEST_TOUCHID_LOG="+promptLog)
+		if out, err := cmd.CombinedOutput(); err != nil || string(out) != "secret123\nsecret123\n" {
+			t.Fatalf("agent: %v: %s", err, out)
+		}
+		prompts, err := os.ReadFile(promptLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(prompts)
+	}
+	for i := range 2 {
+		prompts := agent()
+		if strings.Count(prompts, "\n") != 1 || !strings.Contains(prompts, `"agent":"claude"`) || !strings.Contains(prompts, `"noun":"this Claude Code session"`) {
+			t.Errorf("agent %d: expected one prompt, naming its Claude Code session, got: %s", i, prompts)
+		}
+	}
+}
+
 // sessions.json is writable (and readable) by any process running as the
 // user, so an approval only counts if its MAC checks out against the secret
 // in the keychain, and the file doesn't say what the approvals are for.

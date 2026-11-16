@@ -1,8 +1,9 @@
 //go:build !test
 
 // TouchID authentication with an inline context window. The window shows:
-//   - "opcli · access requested" title + a monospace sub-line identifying
-//     the invoking command and tty
+//   - "opcli · access requested" title + a monospace sub-line with the
+//     invoking command, and another naming the scope the approval is kept
+//     for: the agent session or terminal tab, and when it started
 //   - vault-grouped list of op:// refs in a bordered box; the field (last
 //     segment) of each ref is highlighted in the accent color so the reader
 //     can scan for "what's being read"
@@ -20,11 +21,12 @@
 // only control its placement and size.
 //
 // Payload (JSON, passed from Go):
-//   {"command":"claude deploy.sh", "tty":"ttys003",
+//   {"command":"make deploy",
+//    "scope":{"agent":"claude","title":"Fix the deploy script",
+//             "started":"3h ago","noun":"this Claude Code session"},
 //    "groups":[{"vault":"Employee","refs":["item/field", ...]}, ...]}
-// or, for everything:
-//   {"command":"opcli plugin init gh", "tty":"ttys003",
-//    "everything":["my", "work"]}
+// or, for everything (never kept, so no scope):
+//   {"command":"opcli plugin init gh", "everything":["my", "work"]}
 //
 // Fallback: if biometrics aren't available the inline-window path is
 // skipped entirely and we use the classic LAContext.evaluatePolicy
@@ -64,6 +66,8 @@ static NSColor *colorTextDim(void)      { return [NSColor colorWithSRGBRed:0.655
 static NSColor *colorTextFaint(void)    { return [NSColor colorWithSRGBRed:0.420 green:0.396 blue:0.357 alpha:1.0]; }
 static NSColor *colorAccent(void)       { return [NSColor colorWithSRGBRed:0.171 green:0.799 blue:0.922 alpha:1.0]; } // oklch(0.78 0.13 215)
 
+static NSColor *colorClaude(void)       { return [NSColor colorWithSRGBRed:0.851 green:0.467 blue:0.341 alpha:1.0]; } // #d97757
+
 // Full-access requests only.
 static NSColor *colorWarn(void)         { return [NSColor colorWithSRGBRed:1.000 green:0.478 blue:0.271 alpha:1.0]; } // #ff7a45
 static NSColor *colorWarnBox(void)      { return [NSColor colorWithSRGBRed:0.180 green:0.094 blue:0.063 alpha:1.0]; } // #2e1810
@@ -101,11 +105,11 @@ static NSAttributedString *renderRefAttr(NSString *ref) {
     return out;
 }
 
-// Header: "opcli · access requested" title + optional monospace sub-line
-// "$ <command>  ·  <tty>". Either command or tty may be empty; the sub-line
-// is suppressed if both are. For everything, the title says so, in the
-// warning color.
-static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width, BOOL everything) {
+// Header: "opcli · access requested" title, then up to two monospace
+// sub-lines: "$ <command>", and the scope, eg "✻ Fix the deploy script ·
+// started 3h ago" (the mark is Claude's, for a Claude Code session). For
+// everything, the title says so, in the warning color.
+static NSView *buildHeader(NSString *command, NSDictionary *scope, CGFloat width, BOOL everything) {
     OpcliFlippedView *v = [[OpcliFlippedView alloc] initWithFrame:NSMakeRect(0,0,width,0)];
 
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
@@ -126,32 +130,39 @@ static NSView *buildHeader(NSString *command, NSString *tty, CGFloat width, BOOL
     [v addSubview:titleField];
 
     CGFloat y = 22;
-    if (command.length || tty.length) {
+    NSDictionary *faint = @{NSFontAttributeName: fontMono(12, NSFontWeightRegular), NSForegroundColorAttributeName: colorTextFaint()};
+    NSDictionary *dim   = @{NSFontAttributeName: fontMono(12, NSFontWeightRegular), NSForegroundColorAttributeName: colorTextDim()};
+    NSMutableArray<NSAttributedString *> *subs = [NSMutableArray array];
+    if (command.length) {
         NSMutableAttributedString *sub = [[NSMutableAttributedString alloc] init];
-        if (command.length) {
-            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"$ " attributes:@{
-                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
-                NSForegroundColorAttributeName: colorTextFaint(),
-            }]];
-            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:command attributes:@{
-                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
-                NSForegroundColorAttributeName: colorTextDim(),
-            }]];
-        }
-        if (command.length && tty.length) {
-            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@" · " attributes:@{
-                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
-                NSForegroundColorAttributeName: colorTextFaint(),
+        [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"$ " attributes:faint]];
+        [sub appendAttributedString:[[NSAttributedString alloc] initWithString:command attributes:dim]];
+        [subs addObject:sub];
+    }
+    NSString *scopeTitle = scope[@"title"];
+    if ([scopeTitle isKindOfClass:[NSString class]] && scopeTitle.length) {
+        NSMutableAttributedString *sub = [[NSMutableAttributedString alloc] init];
+        if ([scope[@"agent"] isEqual:@"claude"]) {
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@"✻ " attributes:@{
+                NSFontAttributeName: fontMono(12, NSFontWeightBold),
+                NSForegroundColorAttributeName: colorClaude(),
             }]];
         }
-        if (tty.length) {
-            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:tty attributes:@{
-                NSFontAttributeName: fontMono(12, NSFontWeightRegular),
-                NSForegroundColorAttributeName: colorTextDim(),
-            }]];
+        [sub appendAttributedString:[[NSAttributedString alloc] initWithString:scopeTitle attributes:@{
+            NSFontAttributeName: fontMono(12, NSFontWeightMedium),
+            NSForegroundColorAttributeName: colorText(),
+        }]];
+        NSString *started = scope[@"started"];
+        if ([started isKindOfClass:[NSString class]] && started.length) {
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:@" · started " attributes:faint]];
+            [sub appendAttributedString:[[NSAttributedString alloc] initWithString:started attributes:dim]];
         }
+        [subs addObject:sub];
+    }
+    for (NSAttributedString *sub in subs) {
         NSTextField *subField = [NSTextField labelWithAttributedString:sub];
-        [subField setLineBreakMode:NSLineBreakByTruncatingTail];
+        // Middle, so that a long title doesn't push "started ..." out of view.
+        [subField setLineBreakMode:NSLineBreakByTruncatingMiddle];
         [subField setFrame:NSMakeRect(0, y, width, 16)];
         [v addSubview:subField];
         y += 18;
@@ -316,10 +327,11 @@ static NSView *buildEverythingBox(NSArray *accounts, CGFloat width) {
     return box;
 }
 
-// Footer caption: "Stays approved for this terminal until unused for 10 min."
+// Footer caption: "Stays approved for <the scope> until unused for 10 min."
 // "10 min" is emphasized slightly so the duration pops. Access to everything
-// is never kept: its caption says that instead.
-static NSView *buildFooterCaption(CGFloat contentW, BOOL everything) {
+// is never kept, nor is anything when there's no scope to keep it for (noun
+// is nil): the caption says that instead.
+static NSView *buildFooterCaption(CGFloat contentW, NSString *noun) {
     NSDictionary *faint = @{
         NSFontAttributeName: fontMono(11, NSFontWeightRegular),
         NSForegroundColorAttributeName: colorTextFaint(),
@@ -329,11 +341,11 @@ static NSView *buildFooterCaption(CGFloat contentW, BOOL everything) {
         NSForegroundColorAttributeName: colorTextDim(),
     };
     NSMutableAttributedString *a = [[NSMutableAttributedString alloc] init];
-    if (everything) {
+    if (!noun) {
         [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"This once" attributes:emph]];
         [a appendAttributedString:[[NSAttributedString alloc] initWithString:@", for this command only. Nothing stays approved." attributes:faint]];
     } else {
-        [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"Stays approved for this terminal until unused for " attributes:faint]];
+        [a appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"Stays approved for %@ until unused for ", noun] attributes:faint]];
         [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"10 min" attributes:emph]];
         [a appendAttributedString:[[NSAttributedString alloc] initWithString:@". Covers nothing else." attributes:faint]];
     }
@@ -391,7 +403,8 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     NSDictionary *payload = [obj isKindOfClass:[NSDictionary class]] ? obj : @{};
     NSString *command = payload[@"command"]; if (![command isKindOfClass:[NSString class]]) command = @"";
-    NSString *tty     = payload[@"tty"];     if (![tty     isKindOfClass:[NSString class]]) tty = @"";
+    NSDictionary *scope = payload[@"scope"]; if (![scope   isKindOfClass:[NSDictionary class]]) scope = nil;
+    NSString *noun    = scope[@"noun"];      if (![noun    isKindOfClass:[NSString class]]) noun = nil;
     NSArray  *groups  = payload[@"groups"];  if (![groups  isKindOfClass:[NSArray  class]]) groups = @[];
     NSArray  *everything = payload[@"everything"]; if (![everything isKindOfClass:[NSArray class]]) everything = nil;
 
@@ -399,9 +412,9 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     CGFloat hPad = 22;
     CGFloat contentW = w - 2*hPad;
 
-    NSView *header     = buildHeader(command, tty, contentW, everything != nil);
+    NSView *header     = buildHeader(command, scope, contentW, everything != nil);
     NSView *secretsBox = everything ? buildEverythingBox(everything, contentW) : buildSecretsBox(groups, contentW);
-    NSView *caption    = buildFooterCaption(contentW, everything != nil);
+    NSView *caption    = buildFooterCaption(contentW, everything ? nil : noun);
     NSView *authRow    = buildAuthRow(authView, cancelTarget, w);
 
     CGFloat headerH  = header.frame.size.height;

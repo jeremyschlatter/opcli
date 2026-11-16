@@ -508,7 +508,10 @@ var ErrAuthRefused = errors.New("authentication failed or cancelled")
 //
 // Refs look like "op://[account:]vault/item/[section/]field". The window
 // groups them by "[account:]vault": everything up to the first '/'.
-func AuthenticateBiometric(refs []string) error {
+//
+// sc is the scope the approval will be kept for, which the window names, or
+// nil if it won't be kept.
+func AuthenticateBiometric(refs []string, sc *scope) error {
 	if len(refs) == 0 {
 		panic("AuthenticateBiometric: nothing to approve")
 	}
@@ -538,27 +541,48 @@ func AuthenticateBiometric(refs []string) error {
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Vault < groups[j].Vault })
-	return touchID("access your 1Password credentials", map[string]any{"groups": groups})
+	return touchID("access your 1Password credentials", map[string]any{"groups": groups}, sc)
 }
 
 // AuthenticateBiometricEverything prompts for Touch ID to approve reading
 // every item of the given accounts (named however the user should see them).
 // The window says so, and looks unlike the one for individual refs.
 func AuthenticateBiometricEverything(accounts []string) error {
-	return touchID("read every item in your 1Password vaults", map[string]any{"everything": accounts})
+	return touchID("read every item in your 1Password vaults", map[string]any{"everything": accounts}, nil)
 }
 
 // touchID shows the Touch ID prompt inside the authorization window that
-// touchid.m draws from payload, to which it adds who is asking:
+// touchid.m draws from payload, to which it adds who is asking, and the scope
+// (if any) that the approval will be kept for:
 //
-//	{"command":"claude deploy.sh","tty":"ttys003",
+//	{"command":"make deploy",
+//	 "scope":{"agent":"claude","title":"Fix the deploy script","started":"3h ago",
+//	          "noun":"this Claude Code session"},
 //	 "groups":[{"vault":"Employee","refs":["Item A/field", ...]}, ...]}
 //
 // or, for access to everything, "everything":["account", ...] in place of
 // "groups". reason is the text macOS shows if it falls back to its own dialog.
-func touchID(reason string, payload map[string]any) error {
-	payload["command"] = describeInvokingCommand()
-	payload["tty"] = shortTTYName()
+func touchID(reason string, payload map[string]any, sc *scope) error {
+	anchor := 0
+	if sc != nil {
+		anchor = sc.pid
+		title, noun := sc.describe()
+		started := ""
+		if !sc.started.IsZero() {
+			switch age := time.Since(sc.started); {
+			case age < time.Minute:
+				started = fmt.Sprintf("%ds ago", int(age.Seconds()))
+			case age < time.Hour:
+				started = fmt.Sprintf("%dm ago", int(age.Minutes()))
+			case age < 48*time.Hour:
+				started = fmt.Sprintf("%dh ago", int(age.Hours()))
+			default:
+				started = fmt.Sprintf("%dd ago", int(age.Hours()/24))
+			}
+		}
+		payload["scope"] = map[string]string{"agent": sc.agent, "title": title, "started": started, "noun": noun}
+	}
+	payload["command"] = describeInvokingCommand(anchor)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -597,10 +621,11 @@ func splitVaultAndDisplay(ref string) (vault, display string) {
 // The returned string basenames the first token (so "/usr/local/bin/claude"
 // becomes "claude") and preserves any trailing args. Returns "" when only
 // shells are found above us — e.g. when opcli is run directly at a prompt,
-// there's no invoking command to surface.
-func describeInvokingCommand() string {
+// there's no invoking command to surface. The walk stops at the process
+// stopPid (the scope's anchor, which the window names separately).
+func describeInvokingCommand(stopPid int) string {
 	pid := os.Getppid()
-	for i := 0; i < 16 && pid > 1; i++ {
+	for i := 0; i < 16 && pid > 1 && pid != stopPid; i++ {
 		cmd, ppid, ok := psLookup(pid)
 		if !ok {
 			return ""
@@ -671,18 +696,6 @@ func isShellCommand(name string) bool {
 
 func isOpcliCommand(name string) bool {
 	return name == "opcli" || name == "opcli-test"
-}
-
-// shortTTYName returns the TTY basename (e.g. "ttys003") for display in the
-// TouchID window. Falls back to "" when no TTY is attached.
-func shortTTYName() string {
-	if p := currentTTYPath(); p != "" {
-		return strings.TrimPrefix(p, "/dev/")
-	}
-	if p := findAncestorTTY(); p != "" {
-		return strings.TrimPrefix(p, "/dev/")
-	}
-	return ""
 }
 
 // HasStoredCredentials checks if credentials exist for the account.

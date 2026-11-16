@@ -292,7 +292,7 @@ func cmdPlugin(args []string, accountFlag string) (int, error) {
 				return 0, err
 			}
 			scope := map[string]string{
-				pluginScopeSession:   "This terminal session",
+				pluginScopeSession:   "This agent session or terminal tab",
 				pluginScopeDirectory: "Directory " + tildePath(filepath.Dir(filepath.Dir(filepath.Dir(c.path)))),
 				pluginScopeGlobal:    "Global default",
 			}[c.scope]
@@ -618,11 +618,11 @@ func pluginConfigPath(name, scope string) (string, error) {
 	}
 	switch scope {
 	case pluginScopeSession:
-		key, err := getSessionKey()
+		sc, err := currentScope()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(dataDir, "plugins", "sessions", key, name+".json"), nil
+		return filepath.Join(dataDir, "plugins", "sessions", sc.key, name+".json"), nil
 	case pluginScopeDirectory:
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -636,7 +636,7 @@ func pluginConfigPath(name, scope string) (string, error) {
 }
 
 // pluginConfigs returns the configs that apply to the plugin `name` here
-// and now, highest precedence first: this terminal session, the enclosing
+// and now, highest precedence first: this session (see currentScope), the enclosing
 // directories from the current one outward, then the global default.
 func pluginConfigs(name string) ([]foundPluginConfig, error) {
 	var found []foundPluginConfig
@@ -663,8 +663,9 @@ func pluginConfigs(name string) ([]foundPluginConfig, error) {
 		return nil, err
 	}
 
-	// A session config lasts as long as its terminal. No terminal, no session scope.
-	if _, err := getSessionKey(); err == nil {
+	// A session config lasts as long as its scope: the agent or terminal tab
+	// we're running in (see currentScope). No scope, no session config.
+	if _, err := currentScope(); err == nil {
 		path, err := pluginConfigPath(name, pluginScopeSession)
 		if err != nil {
 			return nil, err
@@ -983,7 +984,7 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 	if err := survey.AskOne(&survey.Select{
 		Message: "Configure when the chosen credential(s) will be used to authenticate:",
 		Options: []string{
-			"Prompt me for each new terminal session",
+			"Prompt me for each new agent session or terminal tab",
 			"Use automatically when in this directory or subdirectories",
 			"Use as global default on my system",
 		},
@@ -1007,25 +1008,13 @@ func pluginConfigure(p schema.Plugin, exe schema.Executable, accountFlag string)
 		return nil, err
 	}
 	if scopes[scope] == pluginScopeSession {
-		// Sweep up the configs of terminal sessions that have ended.
-		live := map[string]bool{filepath.Base(filepath.Dir(path)): true}
-		ttys, err := filepath.Glob("/dev/ttys*")
-		if err != nil {
-			return nil, err
-		}
-		for _, tty := range ttys {
-			key, err := sessionKeyForTTY(tty)
-			if err != nil {
-				return nil, err
-			}
-			live[key] = true
-		}
+		// Sweep up the configs of sessions that have ended.
 		sessions, err := os.ReadDir(filepath.Dir(filepath.Dir(path)))
 		if err != nil {
 			return nil, err
 		}
 		for _, session := range sessions {
-			if !live[session.Name()] {
+			if session.Name() != filepath.Base(filepath.Dir(path)) && !scopeKeyLive(session.Name()) {
 				if err := os.RemoveAll(filepath.Join(filepath.Dir(filepath.Dir(path)), session.Name())); err != nil {
 					return nil, err
 				}

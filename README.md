@@ -47,7 +47,7 @@ The release binary is signed with my certificate. To build from source you will 
 # First time: sign in (stores credentials in Keychain)
 opcli signin
 
-# Read a field from an item (prompts Touch ID the first time a terminal reads it)
+# Read a field from an item (prompts Touch ID the first time a terminal or agent reads it)
 opcli read "op://VaultName/ItemName/fieldname"
 
 # Read a field in a section
@@ -96,8 +96,8 @@ exec opcli ssh-sign "op://Private/My SSH Key/private_key" "$@"
 
 Unlike the 1Password agent, the Touch ID prompt belongs to the `opcli` process,
 so killing it (say, with `timeout`) takes the prompt down with it. Approvals
-last as usual: one covers commits from that terminal until 10 minutes pass
-without one.
+last as usual: one covers commits from that terminal or agent until 10 minutes
+pass without one.
 
 When Touch ID doesn't authenticate, because the prompt was cancelled or macOS
 wouldn't show it (for example while the screen is locked), every opcli command
@@ -124,7 +124,8 @@ named for the executable. Put that directory ahead of the real executables on
 your `PATH`. Run through a shim, opcli acts as `opcli plugin run -- <name>`,
 and finds the real executable further along the `PATH`.
 
-The chosen item is used for the current terminal session, a directory tree
+The chosen item is used for the current agent session or terminal tab (the
+same scope that [approvals](#sessions) have), a directory tree
 (`.opcli/plugins/` in it), or globally (`~/.opcli/plugins/`).
 
 To let you search for the item, `init` reads every item in your vaults. Its
@@ -175,7 +176,7 @@ Set `OPCLI_AUTO_ACCOUNT=1` to automatically resolve which account a vault belong
 
 opcli is tuned for a machine where agents run most of the commands: they should be able to use secrets without seeing them, and I should be able to tell what I'm approving.
 
-- **Touch ID approves specific secrets**, not the whole account: see [Sessions](#sessions).
+- **Touch ID approves specific secrets**, not the whole account, and gives the approval to one agent session or terminal tab: see [Sessions](#sessions).
 - **`opcli get` masks concealed values** (passwords, one-time password secrets, private keys) unless you pass `--reveal`. An agent inspecting an item's structure doesn't end up with its secrets in its context. `opcli get` also isn't `op item get`: it prints 1Password's own JSON for the item.
 - **`opcli run` masks secrets** in the command's output, as `op run` does.
 - **`op://account:vault/...`** references and `OPCLI_AUTO_ACCOUNT`: see [Secret reference format](#secret-reference-format).
@@ -205,7 +206,20 @@ approved prompts again, listing only what's new.
 An approval:
 - lasts until its reference goes **10 minutes** without being read
 - lasts **12 hours** at most
-- belongs to one terminal window/tab
+- belongs to one run of a coding agent, or one terminal tab
+
+Whose approval it is, is decided by opcli's ancestor processes. If one of them
+is a coding agent (`claude` or `codex`), the approval belongs to the nearest
+such process: that run of the agent, and no other. Otherwise it belongs to the
+terminal tab, meaning the tab's first process, usually your login shell. The
+prompt says which, for example "✻ Fix the deploy script · started 3h ago" for
+a Claude Code session, or "Terminal tab ttys005 · started 2d ago". With neither
+an agent nor a terminal above it, opcli asks every time.
+
+Ancestry is used because a process can't choose its ancestors, whereas it can
+open any terminal of yours and present it as its own. That keeps one agent
+from using what you approved for another. It does not stop malware running as
+you, which has other ways in (it can edit the files your shell or agent runs).
 
 The only command that reads more than it lists is `opcli plugin init`, which
 needs every item (see [Shell plugins](#shell-plugins)). Its approval isn't kept.

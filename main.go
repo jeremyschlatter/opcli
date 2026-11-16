@@ -287,8 +287,9 @@ func printUsage() {
 	fmt.Println("  OP_ACCOUNT env var                   - Alternative to --account flag")
 	fmt.Println()
 	fmt.Println("Sessions:")
-	fmt.Println("  After signin, each terminal requires biometric auth (Touch ID) on first")
-	fmt.Println("  access. Sessions last 10 minutes of inactivity, max 12 hours total.")
+	fmt.Println("  Touch ID approves the specific secrets a command reads, for the coding")
+	fmt.Println("  agent session or terminal tab it runs in. An approval lasts until its")
+	fmt.Println("  secret goes 10 minutes unread, max 12 hours total.")
 }
 
 // resolveAccountUUID resolves an account identifier to a UUID.
@@ -490,7 +491,7 @@ func cmdSignin(accountFlag string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "Credentials stored in Keychain.")
-	fmt.Fprintln(os.Stderr, "Use Touch ID to authenticate in each new terminal session.")
+	fmt.Fprintln(os.Stderr, "Touch ID will ask you to approve each secret a terminal or agent reads.")
 	return nil
 }
 
