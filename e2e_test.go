@@ -410,6 +410,39 @@ func TestE2E_TouchIDFail(t *testing.T) {
 	}
 }
 
+// `get` shows an item's structure without its secrets, unless asked.
+func TestE2E_GetConceals(t *testing.T) {
+	env := setupTestEnv(t, false)
+	t.Cleanup(func() { env.cleanup(t) })
+
+	stdout, stderr, code := env.runCLI("", "", nil, "get", "op://Private/Test Login")
+	if code != 0 {
+		t.Fatalf("get: exit code %d; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "testuser") || !strings.Contains(stdout, `"value": "<concealed>"`) || strings.Contains(stdout, "secret123") {
+		t.Errorf("get should show the username and conceal the password, got: %s", stdout)
+	}
+	if !strings.Contains(stderr, "--reveal") {
+		t.Errorf("get should say how to see concealed values, got stderr: %s", stderr)
+	}
+
+	stdout, stderr, code = env.runCLI("", "", nil, "get", "op://Private/Test SSH Key")
+	if code != 0 {
+		t.Fatalf("get: exit code %d; stderr: %s", code, stderr)
+	}
+	if strings.Contains(stdout, "PRIVATE KEY") {
+		t.Errorf("get should conceal an SSH private key, got: %s", stdout)
+	}
+
+	stdout, stderr, code = env.runCLI("", "", nil, "get", "--reveal", "op://Private/Test Login")
+	if code != 0 {
+		t.Fatalf("get --reveal: exit code %d; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "secret123") {
+		t.Errorf("get --reveal should show the password, got: %s", stdout)
+	}
+}
+
 // Touch ID approves refs, not terminals: an approval covers exactly what its
 // prompt listed, for the terminal session it was given in.
 func TestE2E_ApprovalScope(t *testing.T) {

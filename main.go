@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -200,11 +201,23 @@ func main() {
 			fatal(err)
 		}
 	case "get":
-		if len(args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: opcli get <op://vault/item>")
+		var uri string
+		var reveal bool
+		for _, arg := range args[2:] {
+			if arg == "--reveal" {
+				reveal = true
+			} else if uri == "" && !strings.HasPrefix(arg, "-") {
+				uri = arg
+			} else {
+				uri = ""
+				break
+			}
+		}
+		if uri == "" {
+			fmt.Fprintln(os.Stderr, "Usage: opcli get [--reveal] <op://vault/item>")
 			os.Exit(1)
 		}
-		if err := cmdGet(args[2], accountFlag); err != nil {
+		if err := cmdGet(uri, reveal, accountFlag); err != nil {
 			fatal(err)
 		}
 	case "ssh-sign":
@@ -256,7 +269,9 @@ func printUsage() {
 	fmt.Println("  opcli read <op://vault/item/field>   - Read a field from an item")
 	fmt.Println("  opcli read <op://vault/item/section/field>")
 	fmt.Println("  opcli list [--account <acct>]        - List all vaults")
-	fmt.Println("  opcli get <op://vault/item>          - Dump item as JSON")
+	fmt.Println("  opcli get [--reveal] <op://vault/item>")
+	fmt.Println("                                       - Dump item as JSON; passwords and other")
+	fmt.Println("                                         concealed values only with --reveal")
 	fmt.Println("  opcli inject [-i file] [-o file]     - Inject secrets into template")
 	fmt.Println("  opcli run [--env-file=<file>]... [--tui] -- <command>")
 	fmt.Println("                                       - Run command with secrets as env vars")
@@ -1303,7 +1318,14 @@ func cmdList(accountFlag string) error {
 	return nil
 }
 
-func cmdGet(uri string, accountFlag string) error {
+// concealed stands in for a concealed value in the output of `opcli get`.
+const concealed = "<concealed>"
+
+// cmdGet dumps an item as JSON. Unless reveal is set, the values 1Password
+// conceals (passwords, one-time password secrets, private keys) are replaced
+// with a placeholder: the structure of an item is usually what's wanted, and
+// its secrets shouldn't land in a terminal or an agent's context on the way.
+func cmdGet(uri string, reveal bool, accountFlag string) error {
 	if !strings.HasPrefix(uri, "op://") {
 		return fmt.Errorf("invalid URI: must start with op://")
 	}
@@ -1319,10 +1341,17 @@ func cmdGet(uri string, accountFlag string) error {
 	}
 	defer aks.Close()
 
-	if err := aks.authorize(Grant{
+	grant := Grant{
 		Key: "get:" + aks.defaultAccount + ":" + vaultName + "/" + itemName,
-		Ref: "op://" + vaultName + "/" + itemName + "/every field",
-	}); err != nil {
+		Ref: "op://" + vaultName + "/" + itemName + "/all but concealed fields",
+	}
+	if reveal {
+		grant = Grant{
+			Key: "get-reveal:" + aks.defaultAccount + ":" + vaultName + "/" + itemName,
+			Ref: "op://" + vaultName + "/" + itemName + "/every field",
+		}
+	}
+	if err := aks.authorize(grant); err != nil {
 		return err
 	}
 	ak, err := aks.get("", nil) // default account
@@ -1349,14 +1378,73 @@ func cmdGet(uri string, accountFlag string) error {
 		return err
 	}
 
-	pretty, err := json.MarshalIndent(json.RawMessage(decrypted), "", "  ")
-	if err != nil {
-		fmt.Println(string(decrypted))
-	} else {
-		fmt.Println(string(pretty))
+	var details any
+	decoder := json.NewDecoder(bytes.NewReader(decrypted))
+	decoder.UseNumber()
+	if err := decoder.Decode(&details); err != nil {
+		return fmt.Errorf("item details are not JSON: %w", err)
 	}
 
-	return nil
+	if !reveal {
+		masked := 0
+		// conceal masks value if it is a secret. Empty values are left alone:
+		// that a field is blank is worth seeing, and gives nothing away.
+		conceal := func(value any) any {
+			if value == nil || value == "" {
+				return value
+			}
+			masked++
+			return concealed
+		}
+		var walk func(v any)
+		walk = func(v any) {
+			switch v := v.(type) {
+			case []any:
+				for _, child := range v {
+					walk(child)
+				}
+			case map[string]any:
+				for key, child := range v {
+					switch {
+					// A field of a section: {"k": kind, "t": label, "v": value}.
+					case key == "v" && (v["k"] == "concealed" || v["k"] == "sshKey"),
+						// A top-level field: {"type": "P" for passwords, "name", "value"}.
+						key == "value" && (v["type"] == "P" || v["type"] == "concealed" || v["type"] == "sshKey"),
+						// The typed value of a field in 1Password's newer format:
+						// {"value": {"concealed": "..."}}, likewise "totp".
+						key == "concealed", key == "totp",
+						// SSH key items, which keep the key in more than one place.
+						key == "privateKey":
+						v[key] = conceal(child)
+					default:
+						walk(child)
+					}
+				}
+			}
+		}
+		walk(details)
+		if item, ok := details.(map[string]any); ok {
+			// Password items keep the password outside the fields.
+			if _, ok := item["password"]; ok {
+				item["password"] = conceal(item["password"])
+			}
+			if history, ok := item["passwordHistory"].([]any); ok {
+				for _, entry := range history {
+					if entry, ok := entry.(map[string]any); ok {
+						entry["value"] = conceal(entry["value"])
+					}
+				}
+			}
+		}
+		if masked > 0 {
+			fmt.Fprintf(os.Stderr, "opcli: %d concealed value(s) shown as %s. Read one with `opcli read`, or all with `opcli get --reveal`.\n", masked, concealed)
+		}
+	}
+
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(details)
 }
 
 func cmdInject(args []string, accountFlag string) error {

@@ -4,6 +4,8 @@
 
 A fast, local 1Password CLI alternative. Reads directly from 1Password's local SQLite database instead of making network calls.
 
+opcli started as a faster `op`, and the commands they share look alike. But it is not a strict drop-in replacement. I build it for how I work, which is mostly through AI coding agents that run commands on my behalf, and where that calls for something `op` doesn't do, opcli goes its own way. See [Differences from `op`](#differences-from-op).
+
 ## Performance
 
 ~30x faster than the official `op` CLI:
@@ -58,8 +60,11 @@ opcli read "op://AccountName:VaultName/ItemName/SectionName/fieldname"
 # List all vaults
 opcli list
 
-# Dump an item as JSON
+# Dump an item as JSON, with passwords and other concealed values masked
 opcli get "op://VaultName/ItemName"
+
+# ...or with everything shown
+opcli get --reveal "op://VaultName/ItemName"
 
 # Remove credentials from Keychain
 opcli signout
@@ -165,6 +170,18 @@ Account-qualified references work everywhere `op://` refs are supported: `read`,
 ### Auto-resolving accounts (`OPCLI_AUTO_ACCOUNT`)
 
 Set `OPCLI_AUTO_ACCOUNT=1` to automatically resolve which account a vault belongs to when no account is specified. If the vault name is unambiguous across your signed-in accounts, opcli will use the correct one. If the vault exists in multiple accounts, you'll get an error asking you to specify the account explicitly.
+
+## Differences from `op`
+
+opcli is tuned for a machine where agents run most of the commands: they should be able to use secrets without seeing them, and I should be able to tell what I'm approving.
+
+- **Touch ID approves specific secrets**, not the whole account: see [Sessions](#sessions).
+- **`opcli get` masks concealed values** (passwords, one-time password secrets, private keys) unless you pass `--reveal`. An agent inspecting an item's structure doesn't end up with its secrets in its context. `opcli get` also isn't `op item get`: it prints 1Password's own JSON for the item.
+- **`opcli run` masks secrets** in the command's output, as `op run` does.
+- **`op://account:vault/...`** references and `OPCLI_AUTO_ACCOUNT`: see [Secret reference format](#secret-reference-format).
+- **Exit status 3** when Touch ID doesn't authenticate, so a wrapper can tell "nobody approved" from "broken".
+- **`opcli ssh-sign`** signs git commits without the 1Password SSH agent.
+- **Read-only**, macOS only, and only the commands listed above.
 
 ## Security
 
