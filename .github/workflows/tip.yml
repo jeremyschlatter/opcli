@@ -59,19 +59,20 @@ jobs:
           tar -czvf opcli-tip-darwin-${ARCH}.tar.gz opcli.app
           echo "ARCHIVE=opcli-tip-darwin-${ARCH}.tar.gz" >> $GITHUB_ENV
 
-      - name: Update tip tag
+      # Recreate the release rather than updating it in place. GitHub shows a
+      # release's original publish date, and has no way to move it, so a
+      # release updated in place looks months old however fresh its build is.
+      - name: Replace tip release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f tip
-          git push -f origin tip
+          # Fails if there is no tip release yet. A real failure to delete
+          # surfaces below, when the create finds the release still there.
+          gh release delete tip --cleanup-tag --yes || true
+          gh release create tip "$ARCHIVE" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "tip (latest main)" \
+            --notes "Rolling build from the latest commit on \`main\`.
 
-      - name: Update tip release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: tip
-          name: tip (latest main)
-          files: ${{ env.ARCHIVE }}
-          prerelease: true
-          body: |
-            Rolling build from the latest commit on `main`.
-
-            Commit: ${{ github.sha }}
+          Commit: $GITHUB_SHA"
