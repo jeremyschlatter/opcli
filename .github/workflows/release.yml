@@ -50,20 +50,17 @@ jobs:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: make test
 
-      - name: Build
-        run: make VERSION=${{ github.ref_name }}
-
-      - name: Sign binary
+      - name: Build and sign
         env:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: |
-          codesign --sign "$SIGN_IDENTITY" --options runtime --force opcli
-          codesign -vvv --deep --strict opcli
+          make sign VERSION=${{ github.ref_name }}
+          codesign -vvv --deep --strict opcli.app
 
       - name: Create release archive
         run: |
           ARCHIVE=opcli-${{ github.ref_name }}-darwin-$(uname -m).tar.gz
-          tar -czvf $ARCHIVE opcli
+          tar -czvf $ARCHIVE opcli.app
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
           # SRI hash for pkgs/opcli/package.nix in my nix config repo.
           echo "SRI_HASH=sha256-$(openssl dgst -sha256 -binary $ARCHIVE | base64)" >> $GITHUB_ENV

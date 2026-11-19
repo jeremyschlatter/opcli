@@ -26,7 +26,7 @@ var (
 func buildTestBinary() (string, error) {
 	buildOnce.Do(func() {
 		// Get absolute path for the binary
-		testBinPath, buildErr = filepath.Abs("./opcli-test")
+		testBinPath, buildErr = filepath.Abs("./opcli-test.app/Contents/MacOS/opcli-test")
 		if buildErr != nil {
 			return
 		}

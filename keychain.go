@@ -3,167 +3,95 @@ package main
 /*
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
-#include <mach-o/dyld.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// Helper to create CFString from C string
-static CFStringRef createCFString(const char *s) {
-    return CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
-}
-
-// Note: We use the legacy SecAccess/SecTrustedApplication APIs because they're
-// the only way to set app-specific ACLs for Developer ID signed CLI tools.
-// The modern Data Protection Keychain requires App Store entitlements.
-// These APIs are deprecated but still functional.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-
-// Get path to current executable
-static char* getExecutablePath() {
-    static char path[1024];
-    uint32_t size = sizeof(path);
-    if (_NSGetExecutablePath(path, &size) != 0) {
-        return NULL;
-    }
-    // Resolve symlinks to get the real path
-    char *resolved = realpath(path, NULL);
-    return resolved ? resolved : strdup(path);
-}
-
-// Create access control that restricts to current application
-static SecAccessRef createAppOnlyAccess(const char *label) {
-    SecAccessRef access = NULL;
-    SecTrustedApplicationRef trustedApp = NULL;
-
-    char *exePath = getExecutablePath();
-    if (exePath == NULL) {
-        return NULL;
-    }
-
-    OSStatus status = SecTrustedApplicationCreateFromPath(exePath, &trustedApp);
-    free(exePath);
-
-    if (status != errSecSuccess || trustedApp == NULL) {
-        return NULL;
-    }
-
-    CFArrayRef trustedApps = CFArrayCreate(NULL, (const void **)&trustedApp, 1, &kCFTypeArrayCallBacks);
-    CFStringRef labelRef = createCFString(label);
-
-    status = SecAccessCreate(labelRef, trustedApps, &access);
-
-    CFRelease(labelRef);
-    CFRelease(trustedApps);
-    CFRelease(trustedApp);
-
-    if (status != errSecSuccess) {
-        return NULL;
-    }
-
-    return access;
-}
-
-#pragma clang diagnostic pop
 
 // Defined in touchid.m, linked via libtouchid.a
 extern int authenticateTouchID(const char *reason, const char *payloadJSON,
                                const void *iconPNG, int iconPNGLen);
 
-// Add or update a keychain item with app-only access.
+// opcli keeps its keychain items in the data protection keychain, in the
+// access group named by the binary's keychain-access-groups entitlement
+// (macos/*.entitlements). macOS only honors that entitlement on a binary that
+// is signed and carries a matching provisioning profile, which is why opcli
+// ships as opcli.app. Any other process asking for these items is told they
+// don't exist: no prompt, so nothing for the user to approve by mistake.
 //
-// Uses SecItemUpdate for existing items (atomic at the securityd level — concurrent
-// readers see either old or new data, never "not found"). Falls back to SecItemAdd
-// with an app-only ACL when the item does not yet exist (first run).
+// Queries never name the access group. An add lands in the first group of the
+// entitlement, and a search covers every group the binary has, so the code is
+// the same for release builds and test builds, which are signed into
+// different groups.
 //
-// Previously this did SecItemDelete + SecItemAdd, which created a brief window
-// where concurrent SecItemCopyMatching calls observed errSecItemNotFound (-25300).
-// See op-xev for the investigation.
-static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
-    CFStringRef serviceRef = createCFString(service);
-    CFStringRef accountRef = createCFString(account);
-    CFDataRef passwordRef = CFDataCreate(NULL, (const UInt8 *)password, passwordLen);
-
-    // Try atomic update first.
-    CFMutableDictionaryRef updateQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(updateQuery, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(updateQuery, kSecAttrService, serviceRef);
-    CFDictionarySetValue(updateQuery, kSecAttrAccount, accountRef);
-
-    CFMutableDictionaryRef updateAttrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(updateAttrs, kSecValueData, passwordRef);
-
-    OSStatus status = SecItemUpdate(updateQuery, updateAttrs);
-
-    CFRelease(updateQuery);
-    CFRelease(updateAttrs);
-
-    if (status == errSecSuccess) {
-        CFRelease(serviceRef);
-        CFRelease(accountRef);
-        CFRelease(passwordRef);
-        return status;
-    }
-
-    if (status != errSecItemNotFound) {
-        CFRelease(serviceRef);
-        CFRelease(accountRef);
-        CFRelease(passwordRef);
-        return status;
-    }
-
-    // Item doesn't exist yet — create it with the app-only ACL.
-    SecAccessRef access = createAppOnlyAccess("opcli credentials");
-
-    CFMutableDictionaryRef addQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(addQuery, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(addQuery, kSecAttrService, serviceRef);
-    CFDictionarySetValue(addQuery, kSecAttrAccount, accountRef);
-    CFDictionarySetValue(addQuery, kSecValueData, passwordRef);
-    if (access != NULL) {
-        CFDictionarySetValue(addQuery, kSecAttrAccess, access);
-    }
-
-    status = SecItemAdd(addQuery, NULL);
-
-    // Another writer may have created the item between our Update and Add —
-    // retry Update in that case so we don't spuriously fail.
-    if (status == errSecDuplicateItem) {
-        CFMutableDictionaryRef retryQuery = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(retryQuery, kSecClass, kSecClassGenericPassword);
-        CFDictionarySetValue(retryQuery, kSecAttrService, serviceRef);
-        CFDictionarySetValue(retryQuery, kSecAttrAccount, accountRef);
-
-        CFMutableDictionaryRef retryAttrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(retryAttrs, kSecValueData, passwordRef);
-
-        status = SecItemUpdate(retryQuery, retryAttrs);
-
-        CFRelease(retryQuery);
-        CFRelease(retryAttrs);
-    }
-
-    CFRelease(addQuery);
-    if (access) CFRelease(access);
-    CFRelease(serviceRef);
-    CFRelease(accountRef);
-    CFRelease(passwordRef);
-
-    return status;
-}
-
-
-// Get a keychain item
-// Returns the password in *outPassword (caller must free) and length in *outLen
-// Returns errSecSuccess on success
-static OSStatus keychainGet(const char *service, const char *account, char **outPassword, int *outLen) {
-    CFStringRef serviceRef = createCFString(service);
-    CFStringRef accountRef = createCFString(account);
-
+// `legacy` selects the login keychain instead, where opcli up to v0.22 kept
+// its item behind an app ACL. Only the migration in loadCredentialStore uses
+// it. It has to name that keychain: in an entitled binary, a query that names
+// none searches the data protection keychain first.
+static CFMutableDictionaryRef keychainQuery(const char *service, const char *account, int legacy) {
+    CFStringRef serviceRef = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+    CFStringRef accountRef = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(query, kSecAttrService, serviceRef);
     CFDictionarySetValue(query, kSecAttrAccount, accountRef);
+    if (legacy) {
+        SecKeychainRef loginKeychain = NULL;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        OSStatus status = SecKeychainCopyDefault(&loginKeychain);
+#pragma clang diagnostic pop
+        if (status != errSecSuccess) {
+            fprintf(stderr, "opcli: SecKeychainCopyDefault: OSStatus %d\n", (int)status);
+            abort();
+        }
+        CFArrayRef searchList = CFArrayCreate(NULL, (const void **)&loginKeychain, 1, &kCFTypeArrayCallBacks);
+        CFDictionarySetValue(query, kSecMatchSearchList, searchList);
+        CFRelease(searchList);
+        CFRelease(loginKeychain);
+    } else {
+        CFDictionarySetValue(query, kSecUseDataProtectionKeychain, kCFBooleanTrue);
+    }
+    CFRelease(serviceRef);
+    CFRelease(accountRef);
+    return query;
+}
+
+// Add or update a keychain item.
+//
+// Updates in place when the item exists (atomic at the securityd level:
+// concurrent readers see either old or new data, never "not found"), and adds
+// it otherwise. Delete + add would leave a window where concurrent readers
+// see errSecItemNotFound.
+static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
+    CFMutableDictionaryRef query = keychainQuery(service, account, 0);
+    CFDataRef passwordRef = CFDataCreate(NULL, (const UInt8 *)password, passwordLen);
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attrs, kSecValueData, passwordRef);
+
+    OSStatus status = SecItemUpdate(query, attrs);
+    if (status == errSecItemNotFound) {
+        CFDictionarySetValue(query, kSecValueData, passwordRef);
+        CFDictionarySetValue(query, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+        status = SecItemAdd(query, NULL);
+        CFDictionaryRemoveValue(query, kSecValueData);
+        CFDictionaryRemoveValue(query, kSecAttrAccessible);
+        // Another writer created the item between our update and our add.
+        if (status == errSecDuplicateItem) {
+            status = SecItemUpdate(query, attrs);
+        }
+    }
+
+    CFRelease(attrs);
+    CFRelease(passwordRef);
+    CFRelease(query);
+    return status;
+}
+
+// Get a keychain item
+// Returns the password in *outPassword (caller must free) and length in *outLen
+// Returns errSecSuccess on success
+static OSStatus keychainGet(const char *service, const char *account, int legacy, char **outPassword, int *outLen) {
+    CFMutableDictionaryRef query = keychainQuery(service, account, legacy);
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
 
@@ -179,29 +107,30 @@ static OSStatus keychainGet(const char *service, const char *account, char **out
     }
 
     CFRelease(query);
-    CFRelease(serviceRef);
-    CFRelease(accountRef);
-
     return status;
 }
 
-
 // Delete a keychain item
-static OSStatus keychainDelete(const char *service, const char *account) {
-    CFStringRef serviceRef = createCFString(service);
-    CFStringRef accountRef = createCFString(account);
-
-    CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(query, kSecAttrService, serviceRef);
-    CFDictionarySetValue(query, kSecAttrAccount, accountRef);
-
-    OSStatus status = SecItemDelete(query);
-
+static OSStatus keychainDelete(const char *service, const char *account, int legacy) {
+    CFMutableDictionaryRef query = keychainQuery(service, account, legacy);
+    OSStatus status;
+    if (legacy) {
+        // SecItemDelete refuses a login keychain item found through a search
+        // list (errSecInvalidOwnerEdit), so look the item up and delete that.
+        CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
+        CFTypeRef item = NULL;
+        status = SecItemCopyMatching(query, &item);
+        if (status == errSecSuccess) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            status = SecKeychainItemDelete((SecKeychainItemRef)item);
+#pragma clang diagnostic pop
+            CFRelease(item);
+        }
+    } else {
+        status = SecItemDelete(query);
+    }
     CFRelease(query);
-    CFRelease(serviceRef);
-    CFRelease(accountRef);
-
     return status;
 }
 */
@@ -248,6 +177,20 @@ type StoredAccount struct {
 	SymKey         string `json:"symkey,omitempty"`           // base64-encoded symmetric key
 }
 
+var errKeychainNotFound = errors.New("not found in keychain")
+
+func keychainError(status C.OSStatus) error {
+	switch status {
+	case 0:
+		return nil
+	case -25300: // errSecItemNotFound
+		return errKeychainNotFound
+	case -34018: // errSecMissingEntitlement
+		return fmt.Errorf("keychain error: this opcli binary lacks the keychain-access-groups entitlement (it must be signed and run from opcli.app; see `make sign`)")
+	}
+	return fmt.Errorf("keychain error: OSStatus %d", status)
+}
+
 // keychainSet stores a value in the keychain (no biometric)
 func keychainSet(account, password string) error {
 	cService := C.CString(keychainService)
@@ -259,20 +202,22 @@ func keychainSet(account, password string) error {
 	cPassword := C.CString(password)
 	defer C.free(unsafe.Pointer(cPassword))
 
-	status := C.keychainSet(cService, cAccount, cPassword, C.int(len(password)))
-	if status != 0 {
-		return fmt.Errorf("keychain error: OSStatus %d", status)
-	}
-	return nil
+	return keychainError(C.keychainSet(cService, cAccount, cPassword, C.int(len(password))))
 }
 
-// keychainGet retrieves a value from the keychain
-func keychainGet(account string) (string, error) {
+// keychainGet retrieves a value from the keychain, or from the login keychain
+// of opcli ≤ v0.22 when legacy is set.
+func keychainGet(account string, legacy bool) (string, error) {
 	cService := C.CString(keychainService)
 	defer C.free(unsafe.Pointer(cService))
 
 	cAccount := C.CString(account)
 	defer C.free(unsafe.Pointer(cAccount))
+
+	var cLegacy C.int
+	if legacy {
+		cLegacy = 1
+	}
 
 	var outPassword *C.char
 	var outLen C.int
@@ -281,15 +226,12 @@ func keychainGet(account string) (string, error) {
 	if os.Getenv("OPCLI_TIMING") != "" {
 		t0 = time.Now()
 	}
-	status := C.keychainGet(cService, cAccount, &outPassword, &outLen)
+	status := C.keychainGet(cService, cAccount, cLegacy, &outPassword, &outLen)
 	if os.Getenv("OPCLI_TIMING") != "" {
 		fmt.Fprintf(os.Stderr, "      [keychainGet %q: %.2fms]\n", account, float64(time.Since(t0).Microseconds())/1000)
 	}
-	if status != 0 {
-		if status == -25300 { // errSecItemNotFound
-			return "", fmt.Errorf("not found in keychain")
-		}
-		return "", fmt.Errorf("keychain error: OSStatus %d", status)
+	if err := keychainError(status); err != nil {
+		return "", err
 	}
 
 	result := C.GoStringN(outPassword, outLen)
@@ -297,17 +239,22 @@ func keychainGet(account string) (string, error) {
 	return result, nil
 }
 
-// keychainDelete removes a value from the keychain
-func keychainDelete(account string) error {
+// keychainDelete removes a value from the keychain. Deleting what isn't there
+// is not an error.
+func keychainDelete(account string, legacy bool) error {
 	cService := C.CString(keychainService)
 	defer C.free(unsafe.Pointer(cService))
 
 	cAccount := C.CString(account)
 	defer C.free(unsafe.Pointer(cAccount))
 
-	status := C.keychainDelete(cService, cAccount)
-	if status != 0 && status != -25300 { // ignore errSecItemNotFound
-		return fmt.Errorf("keychain error: OSStatus %d", status)
+	var cLegacy C.int
+	if legacy {
+		cLegacy = 1
+	}
+
+	if err := keychainError(C.keychainDelete(cService, cAccount, cLegacy)); err != nil && err != errKeychainNotFound {
+		return err
 	}
 	return nil
 }
@@ -352,13 +299,27 @@ func loadCredentialStore() (*CredentialStore, error) {
 		return cachedCredentialStore, nil
 	}
 
-	data, err := keychainGet(keychainCredentials)
-	if err != nil {
-		// Not found is expected for fresh installs
-		if strings.Contains(err.Error(), "not found") {
+	data, err := keychainGet(keychainCredentials, false)
+	if err == errKeychainNotFound {
+		// opcli up to v0.22 kept the store in the login keychain. Move it over.
+		// That item's ACL admits code signed as "opcli" by the same team, which
+		// this binary still is (see scripts/bundle), so macOS doesn't prompt.
+		data, err = keychainGet(keychainCredentials, true)
+		if err == errKeychainNotFound {
+			// Fresh install.
 			cachedCredentialStore = &CredentialStore{Accounts: make(map[string]*StoredAccount)}
 			return cachedCredentialStore, nil
 		}
+		if err != nil {
+			return nil, fmt.Errorf("migrating credentials from the login keychain: %w", err)
+		}
+		if err := keychainSet(keychainCredentials, data); err != nil {
+			return nil, err
+		}
+		if err := keychainDelete(keychainCredentials, true); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
 	}
 
@@ -732,12 +693,12 @@ func DeleteCredentials(accountUUID string) error {
 
 // DeleteAllCredentials removes all stored credentials.
 func DeleteAllCredentials() error {
-	return keychainDelete(keychainCredentials)
+	return keychainDelete(keychainCredentials, false)
 }
 
 // GetSessionSecret returns the key that authenticates entries in sessions.json,
 // creating it on first use. It is random and lives in the credential store, so
-// it sits behind the same app-only keychain ACL as the account passwords:
+// it sits in the same keychain access group as the account passwords:
 // forging a session takes the same access as reading the passwords directly.
 func GetSessionSecret() ([]byte, error) {
 	store, err := loadCredentialStore()

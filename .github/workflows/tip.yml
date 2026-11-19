@@ -46,20 +46,17 @@ jobs:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: make test
 
-      - name: Build
-        run: make VERSION=tip
-
-      - name: Sign binary
+      - name: Build and sign
         env:
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: |
-          codesign --sign "$SIGN_IDENTITY" --options runtime --force opcli
-          codesign -vvv --deep --strict opcli
+          make sign VERSION=tip
+          codesign -vvv --deep --strict opcli.app
 
       - name: Create release archive
         run: |
           ARCH=$(uname -m)
-          tar -czvf opcli-tip-darwin-${ARCH}.tar.gz opcli
+          tar -czvf opcli-tip-darwin-${ARCH}.tar.gz opcli.app
           echo "ARCHIVE=opcli-tip-darwin-${ARCH}.tar.gz" >> $GITHUB_ENV
 
       - name: Update tip tag

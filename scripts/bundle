@@ -1,0 +1,26 @@
+#!/bin/sh
+# usage: scripts/bundle <executable> <name> <out.app>
+#
+# Wraps <executable> into <out.app> and signs it as $SIGN_IDENTITY with
+# macos/<name>.entitlements.
+#
+# opcli has to be a bundle, not a bare binary, because its keychain items are
+# gated on the keychain-access-groups entitlement, and macOS only honors that
+# entitlement alongside a provisioning profile, which it looks for in a bundle.
+#
+# Test builds are signed as "opcli-test", into a different access group, so
+# that a binary with Touch ID stubbed out can't read real credentials.
+#
+# The code signing identifier stays <name>, as it was for the bare binary,
+# rather than becoming the bundle ID. The login keychain item that opcli up to
+# v0.22 wrote has an ACL naming that identifier, and matching it is what lets
+# the new opcli move the item over without a macOS password prompt.
+set -eu
+exe=$1 name=$2 app=$3
+macos=$(dirname "$0")/../macos
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS"
+cp "$exe" "$app/Contents/MacOS/$name"
+sed "s/EXECUTABLE/$name/" "$macos/Info.plist" > "$app/Contents/Info.plist"
+cp "$macos/embedded.provisionprofile" "$app/Contents/"
+codesign --sign "$SIGN_IDENTITY" --identifier "$name" --options runtime --entitlements "$macos/$name.entitlements" --force "$app"

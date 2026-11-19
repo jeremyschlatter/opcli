@@ -24,22 +24,25 @@ No network calls. No IPC with the desktop app. Just direct crypto.
 
 ## Installation
 
-Download the [latest release](https://github.com/jeremyschlatter/opcli/releases/latest) from GitHub.
+Download the [latest release](https://github.com/jeremyschlatter/opcli/releases/latest) from GitHub and unpack it. You get `opcli.app`; the command is inside it, so put a symlink to it on your `PATH`:
+
+```bash
+ln -s /path/to/opcli.app/Contents/MacOS/opcli ~/bin/opcli
+```
+
+Keep the bundle intact. opcli is a command-line tool, but macOS only lets it into its keychain items when it runs from the signed bundle (see [Security](#security)).
 
 Or build from source:
 
 ```bash
-make
 make sign SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ```
 
 The build requires Xcode Command Line Tools and Go 1.21+.
 
-### Code Signing (required for Touch ID)
+### Code Signing (required)
 
-For Touch ID support, the binary must be signed with a Developer ID certificate.
-
-The release binary is signed with my certificate. To build from source you will need your own.
+The release is signed with my certificate. To build from source you will need your own Developer ID certificate, and with it your own versions of the files in `macos/`: a Developer ID provisioning profile for an App ID of yours, and entitlements that name your team ID.
 
 ## Usage
 
@@ -190,11 +193,9 @@ opcli is tuned for a machine where agents run most of the commands: they should 
 
 We unfortunately cannot integrate with the 1Password Desktop App for account unlocking, so `opcli signin` will require you to enter your account password.
 
-Your account password is stored in the macOS Keychain with an app-only ACL. After this, `opcli` will always use TouchID to authenticate you. If any other app tries to read your account password from the Keychain, macOS will give you a Keychain password prompt:
+Your account password is stored in the macOS Keychain, in an access group that only opcli belongs to. After this, `opcli` will always use TouchID to authenticate you. If any other app asks the Keychain for your account password, macOS tells it there is no such item. There is no prompt for you to approve by mistake.
 
-> `app` wants to use your confidential information stored in "opcli credentials" in your keychain.
-
-...which you should deny.
+Membership in the access group comes from an entitlement, which macOS honors only on a binary that is signed by the right certificate and carries a provisioning profile from Apple. This is why opcli ships as `opcli.app`. It also means the protection is as good as the signing key's: someone who can sign code with it can build a binary that reads the item.
 
 ### Sessions
 

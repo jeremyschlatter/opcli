@@ -1,4 +1,5 @@
 opcli
+*.app/
 .env
 *.o
 *.a

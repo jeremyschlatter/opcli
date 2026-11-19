@@ -3,11 +3,13 @@
 # Requirements:
 # - Xcode Command Line Tools (clang, ar)
 # - Go 1.21+
-# - Apple Developer ID certificate (for codesigning)
+# - Apple Developer ID certificate (for codesigning), plus a provisioning
+#   profile and entitlements for it in macos/ (the ones checked in are mine)
 
 # Set your signing identity here, or pass via command line:
 #   make SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 SIGN_IDENTITY ?=
+export SIGN_IDENTITY
 
 # Version can be set via command line or defaults to git describe
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -21,7 +23,7 @@ MACOS_MIN := 12.0
 export MACOSX_DEPLOYMENT_TARGET := $(MACOS_MIN)
 export CGO_CFLAGS := -mmacosx-version-min=$(MACOS_MIN)
 
-.PHONY: all clean sign test update-plugins
+.PHONY: all clean sign sign-test test update-plugins
 
 all: opcli
 
@@ -49,10 +51,13 @@ opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql 
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
 	@rm -f obfuscation.go
 
-# Run e2e tests
+# Run unit and e2e tests
 test: libtouchid.a
+ifndef SIGN_IDENTITY
+	$(error SIGN_IDENTITY is not set)
+endif
 	go generate
-	go test ./...
+	go test -exec $(CURDIR)/scripts/exec-test-bundled ./...
 	@rm -f obfuscation.go
 
 # Pull the latest upstream shell plugins (for `opcli plugin`)
@@ -61,19 +66,22 @@ update-plugins:
 	scripts/gen-plugin-registry
 	go mod tidy
 
-# Sign the binary (required for Touch ID and Keychain ACL)
+# Build opcli.app, the signed bundle. An unsigned opcli can't reach its
+# keychain items (see scripts/bundle). Run it as opcli.app/Contents/MacOS/opcli,
+# directly or through a symlink.
 sign: opcli
 ifndef SIGN_IDENTITY
 	$(error SIGN_IDENTITY is not set. Run: make sign SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)")
 endif
-	codesign --sign "$(SIGN_IDENTITY)" --options runtime --force opcli
+	scripts/bundle opcli opcli opcli.app
 
-# Sign the test binary
+# Same for the test binary
 sign-test: opcli-test
 ifndef SIGN_IDENTITY
 	$(error SIGN_IDENTITY is not set)
 endif
-	codesign --sign "$(SIGN_IDENTITY)" --options runtime --force opcli-test
+	scripts/bundle opcli-test opcli-test opcli-test.app
 
 clean:
+	rm -rf opcli.app opcli-test.app
 	rm -f opcli opcli-test libtouchid.a libtouchid_stub.a touchid.o touchid_stub.o

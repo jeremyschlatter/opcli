@@ -1,0 +1,10 @@
+#!/bin/sh
+# `go test -exec` wrapper: the tests that touch the keychain in-process only
+# work from a signed bundle (see scripts/bundle), so wrap the test binary in
+# one before running it.
+set -eu
+exe=$1; shift
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+"$(dirname "$0")/bundle" "$exe" opcli-test "$dir/opcli-test.app" 2>/dev/null
+"$dir/opcli-test.app/Contents/MacOS/opcli-test" "$@"

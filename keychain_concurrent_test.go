@@ -45,7 +45,7 @@ func TestKeychainConcurrentRead(t *testing.T) {
 	if err := keychainSet(testAccount, testValue); err != nil {
 		t.Fatalf("setup keychainSet failed: %v", err)
 	}
-	t.Cleanup(func() { keychainDelete(testAccount) })
+	t.Cleanup(func() { keychainDelete(testAccount, false) })
 
 	const goroutines = 20
 	const baseIterations = 10
@@ -59,7 +59,7 @@ func TestKeychainConcurrentRead(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				val, err := keychainGet(testAccount)
+				val, err := keychainGet(testAccount, false)
 				if err != nil {
 					failures.Add(1)
 					continue
@@ -90,7 +90,7 @@ func TestKeychainConcurrentReadWrite(t *testing.T) {
 	if err := keychainSet(testAccount, "initial-value"); err != nil {
 		t.Fatalf("setup keychainSet failed: %v", err)
 	}
-	t.Cleanup(func() { keychainDelete(testAccount) })
+	t.Cleanup(func() { keychainDelete(testAccount, false) })
 
 	const readers = 20
 	const writers = 3
@@ -107,7 +107,7 @@ func TestKeychainConcurrentReadWrite(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				if _, err := keychainGet(testAccount); err != nil {
+				if _, err := keychainGet(testAccount, false); err != nil {
 					readFailures.Add(1)
 				}
 			}
@@ -146,14 +146,14 @@ func TestKeychainSetAddThenUpdate(t *testing.T) {
 
 	testAccount := "opcli-add-then-update-test"
 	// Ensure clean state.
-	keychainDelete(testAccount)
-	t.Cleanup(func() { keychainDelete(testAccount) })
+	keychainDelete(testAccount, false)
+	t.Cleanup(func() { keychainDelete(testAccount, false) })
 
 	// First call: item doesn't exist → SecItemAdd path.
 	if err := keychainSet(testAccount, "v1"); err != nil {
 		t.Fatalf("initial keychainSet failed: %v", err)
 	}
-	got, err := keychainGet(testAccount)
+	got, err := keychainGet(testAccount, false)
 	if err != nil {
 		t.Fatalf("keychainGet after initial set: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestKeychainSetAddThenUpdate(t *testing.T) {
 	if err := keychainSet(testAccount, "v2"); err != nil {
 		t.Fatalf("update keychainSet failed: %v", err)
 	}
-	got, err = keychainGet(testAccount)
+	got, err = keychainGet(testAccount, false)
 	if err != nil {
 		t.Fatalf("keychainGet after update: %v", err)
 	}
