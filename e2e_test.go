@@ -21,18 +21,27 @@ var (
 	buildOnce   sync.Once
 	buildErr    error
 	testBinPath string
+
+	// Set when the test binary is unsigned and so can't use the keychain.
+	fileKeychainEnv []string
 )
 
 func buildTestBinary() (string, error) {
 	buildOnce.Do(func() {
-		// Get absolute path for the binary
-		testBinPath, buildErr = filepath.Abs("./opcli-test.app/Contents/MacOS/opcli-test")
+		// With a signing identity (as in CI), test the signed bundle against
+		// the real keychain. Without one, test the bare binary and have it
+		// keep its credentials in files.
+		target, path := "sign-test", "./opcli-test.app/Contents/MacOS/opcli-test"
+		if os.Getenv("SIGN_IDENTITY") == "" {
+			target, path = "opcli-test", "./opcli-test"
+			fileKeychainEnv = []string{"OPCLI_TEST_FILE_KEYCHAIN=1"}
+		}
+		testBinPath, buildErr = filepath.Abs(path)
 		if buildErr != nil {
 			return
 		}
 
-		// Build and sign via make
-		cmd := exec.Command("make", "sign-test")
+		cmd := exec.Command("make", target)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -171,7 +180,8 @@ func (e *testEnv) cleanup(t testing.TB) {
 }
 
 // cleanEnv returns os.Environ() with all OPCLI_ vars stripped,
-// so tests aren't affected by the user's configuration.
+// so tests aren't affected by the user's configuration, plus the one that
+// tells an unsigned test binary where to keep its credentials.
 func cleanEnv() []string {
 	var env []string
 	for _, v := range os.Environ() {
@@ -179,7 +189,7 @@ func cleanEnv() []string {
 			env = append(env, v)
 		}
 	}
-	return env
+	return append(env, fileKeychainEnv...)
 }
 
 // baseEnv returns the base environment for CLI commands.

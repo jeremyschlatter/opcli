@@ -51,13 +51,16 @@ opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql 
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
 	@rm -f obfuscation.go
 
-# Run unit and e2e tests
+# Run unit and e2e tests. With SIGN_IDENTITY set, they run from signed bundles
+# against the real keychain. Without it, the keychain tests are skipped and
+# the e2e tests keep their credentials in files.
 test: libtouchid.a
-ifndef SIGN_IDENTITY
-	$(error SIGN_IDENTITY is not set)
-endif
 	go generate
+ifdef SIGN_IDENTITY
 	go test -exec $(CURDIR)/scripts/exec-test-bundled ./...
+else
+	go test ./...
+endif
 	@rm -f obfuscation.go
 
 # Pull the latest upstream shell plugins (for `opcli plugin`)

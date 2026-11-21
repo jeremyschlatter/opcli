@@ -15,6 +15,9 @@ import (
 // binary; plain `go test` builds don't set that tag.)
 func useIsolatedKeychainService(t *testing.T) {
 	t.Helper()
+	if os.Getenv("SIGN_IDENTITY") == "" {
+		t.Skip("the keychain is only reachable from a signed bundle: set SIGN_IDENTITY")
+	}
 	orig := keychainService
 	keychainService = "opcli-concurrent-test"
 	t.Cleanup(func() { keychainService = orig })

@@ -44,6 +44,8 @@ The build requires Xcode Command Line Tools and Go 1.21+.
 
 The release is signed with my certificate. To build from source you will need your own Developer ID certificate, and with it your own versions of the files in `macos/`: a Developer ID provisioning profile for an App ID of yours, and entitlements that name your team ID.
 
+`make test` works without a certificate. It then runs an unsigned test build, which keeps its credentials in files instead of the keychain, and skips the tests of the keychain itself.
+
 ## Usage
 
 ```bash

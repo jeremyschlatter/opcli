@@ -145,6 +145,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,6 +180,16 @@ type StoredAccount struct {
 
 var errKeychainNotFound = errors.New("not found in keychain")
 
+// testKeychainDir, which only test builds set, swaps the keychain for plain
+// files in that directory. The real keychain is out of reach of a binary that
+// isn't signed into opcli's access group, and tests should run without the
+// signing key. CI has the key, and runs the same tests against the keychain.
+var testKeychainDir string
+
+func testKeychainPath(account string) string {
+	return filepath.Join(testKeychainDir, "keychain-"+keychainService+"."+account)
+}
+
 func keychainError(status C.OSStatus) error {
 	switch status {
 	case 0:
@@ -193,6 +204,16 @@ func keychainError(status C.OSStatus) error {
 
 // keychainSet stores a value in the keychain (no biometric)
 func keychainSet(account, password string) error {
+	if testKeychainDir != "" {
+		// Write then rename, so that a concurrent reader never sees half a file.
+		path := testKeychainPath(account)
+		tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+		if err := os.WriteFile(tmp, []byte(password), 0600); err != nil {
+			return err
+		}
+		return os.Rename(tmp, path)
+	}
+
 	cService := C.CString(keychainService)
 	defer C.free(unsafe.Pointer(cService))
 
@@ -208,6 +229,17 @@ func keychainSet(account, password string) error {
 // keychainGet retrieves a value from the keychain, or from the login keychain
 // of opcli ≤ v0.22 when legacy is set.
 func keychainGet(account string, legacy bool) (string, error) {
+	if testKeychainDir != "" {
+		if legacy {
+			return "", errKeychainNotFound
+		}
+		data, err := os.ReadFile(testKeychainPath(account))
+		if os.IsNotExist(err) {
+			return "", errKeychainNotFound
+		}
+		return string(data), err
+	}
+
 	cService := C.CString(keychainService)
 	defer C.free(unsafe.Pointer(cService))
 
@@ -242,6 +274,16 @@ func keychainGet(account string, legacy bool) (string, error) {
 // keychainDelete removes a value from the keychain. Deleting what isn't there
 // is not an error.
 func keychainDelete(account string, legacy bool) error {
+	if testKeychainDir != "" {
+		if legacy {
+			return nil
+		}
+		if err := os.Remove(testKeychainPath(account)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
 	cService := C.CString(keychainService)
 	defer C.free(unsafe.Pointer(cService))
 
