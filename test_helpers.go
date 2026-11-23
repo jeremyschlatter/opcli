@@ -16,7 +16,8 @@ func init() {
 	}
 }
 
-// cmdTestStoreCredentials stores test credentials in the keychain.
+// cmdTestStoreCredentials stores test credentials in the keychain, or with
+// OPCLI_TEST_SECURE_ENCLAVE set, seals them to the (fake) Secure Enclave.
 // This is only available in test builds.
 func cmdTestStoreCredentials() error {
 	accountUUID := os.Getenv("OPCLI_TEST_ACCOUNT_UUID")
@@ -38,6 +39,9 @@ func cmdTestStoreCredentials() error {
 		url = "https://test.1password.com"
 	}
 
+	if os.Getenv("OPCLI_TEST_SECURE_ENCLAVE") != "" {
+		return storeSealedCredentials(accountUUID, password, shorthand, email, url, os.Getenv("OPCLI_TEST_NO_KEY_CACHE") != "")
+	}
 	return StoreCredentials(accountUUID, password, shorthand, email, url)
 }
 

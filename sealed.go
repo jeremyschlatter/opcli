@@ -12,7 +12,7 @@ package main
 #include <stdint.h>
 int se_create(uint8_t **key, long *keyLen, uint8_t **pub, long *pubLen, char **err);
 int se_wrap(const uint8_t *pub, long pubLen, const uint8_t *msg, long msgLen, uint8_t **out, long *outLen, char **err);
-int se_unwrap(const uint8_t *key, long keyLen, const uint8_t *blob, long blobLen, const char *reason,
+int se_unwrap(const uint8_t *key, long keyLen, const uint8_t *blob, long blobLen, const char *reason, void *ctx,
               uint8_t **out, long *outLen, uint8_t **pub, long *pubLen, char **err);
 */
 import "C"
@@ -66,15 +66,17 @@ func seWrap(pub, msg []byte) ([]byte, error) {
 	return seTake(o, on), nil
 }
 
-// seUnwrap opens blob with the key, after the Secure Enclave has had Touch ID,
-// whose prompt shows reason. It returns the key's public key too.
-func seUnwrap(key, blob []byte, reason string) (msg, pub []byte, err error) {
+// seUnwrap opens blob with the key, after the Secure Enclave has had Touch ID.
+// ctx is a retained LAContext already approved for the key (from touchID), or
+// nil to have macOS prompt, showing reason. seUnwrap releases it. It returns
+// the key's public key too.
+func seUnwrap(key, blob []byte, reason string, ctx unsafe.Pointer) (msg, pub []byte, err error) {
 	cReason := C.CString(reason)
 	defer C.free(unsafe.Pointer(cReason))
 	var o, p *C.uint8_t
 	var on, pn C.long
 	var cerr *C.char
-	if err := seErr(C.se_unwrap(sePtr(key), C.long(len(key)), sePtr(blob), C.long(len(blob)), cReason, &o, &on, &p, &pn, &cerr), cerr); err != nil {
+	if err := seErr(C.se_unwrap(sePtr(key), C.long(len(key)), sePtr(blob), C.long(len(blob)), cReason, ctx, &o, &on, &p, &pn, &cerr), cerr); err != nil {
 		return nil, nil, err
 	}
 	return seTake(o, on), seTake(p, pn), nil

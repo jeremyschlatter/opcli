@@ -226,16 +226,22 @@ func claudeSessionTitle(pid int) string {
 // testDataDir can be set by test builds to override the data directory.
 var testDataDir string
 
-func getDataDir() (string, error) {
-	var dir string
+// dataDirPath is getDataDir without creating the directory.
+func dataDirPath() (string, error) {
 	if testDataDir != "" {
-		dir = testDataDir
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(home, ".opcli")
+		return testDataDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".opcli"), nil
+}
+
+func getDataDir() (string, error) {
+	dir, err := dataDirPath()
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
@@ -343,6 +349,20 @@ func approvalMAC(secret []byte, id string, a *Approval) string {
 // exactly the grants it is approving.
 func Authorize(grants []Grant) error {
 	if len(grants) == 0 {
+		return nil
+	}
+
+	// Sealed credentials can't be read without Touch ID for the Secure
+	// Enclave, so an approval could never save a prompt: keep none, and ask
+	// once per command.
+	if sealedMode() {
+		var refs []string
+		for _, g := range grants {
+			refs = append(refs, g.Ref)
+		}
+		if err := AuthenticateBiometric(refs, nil); err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
 		return nil
 	}
 

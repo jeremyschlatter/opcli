@@ -31,6 +31,12 @@
 // Fallback: if biometrics aren't available the inline-window path is
 // skipped entirely and we use the classic LAContext.evaluatePolicy
 // flow — no custom window, unstyled, but functional.
+//
+// In Secure Enclave mode (keyContext non-NULL) the window approves use of the
+// Secure Enclave key rather than a policy: evaluateAccessControl with the
+// key's own flags, so the evaluated context satisfies the key and the Secure
+// Enclave doesn't ask again. The context is handed back to the caller, who
+// unseals with it; the Secure Enclave, not this code, still decides.
 
 #import <AppKit/AppKit.h>
 #import <LocalAuthentication/LocalAuthentication.h>
@@ -51,6 +57,7 @@
 @property(nonatomic, strong) LAContext *context;
 @property(nonatomic, strong) NSWindow  *window;
 @property(nonatomic, assign) BOOL       success;
+@property(nonatomic, assign) BOOL       forKey;   // approve the Secure Enclave key, and keep the context
 - (void)cancelClicked:(id)sender;
 @end
 
@@ -478,6 +485,14 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     BOOL canBiometric = [self.context
         canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                     error:&canErr];
+    if (!canBiometric && self.forKey) {
+        // No context to give: the Secure Enclave asks for itself, and fails
+        // without biometry (which opcli reports as refused).
+        self.context = nil;
+        self.success = YES;
+        [self stopApp];
+        return;
+    }
     if (!canBiometric) {
         // Fallback: no biometrics → classic alert flow, no custom window.
         [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
@@ -498,12 +513,25 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-                 localizedReason:self.reason
-                           reply:^(BOOL result, NSError *authError) {
+    void (^reply)(BOOL, NSError *) = ^(BOOL result, NSError *authError) {
         self.success = result;
         dispatch_async(dispatch_get_main_queue(), ^{ [self stopApp]; });
-    }];
+    };
+    if (self.forKey) {
+        // The flags the key was made with (sep.swift, se_create).
+        SecAccessControlRef ac = SecAccessControlCreateWithFlags(NULL,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAccessControlPrivateKeyUsage | kSecAccessControlBiometryCurrentSet, NULL);
+        [self.context evaluateAccessControl:ac
+                                  operation:LAAccessControlOperationUseKeyKeyExchange
+                            localizedReason:self.reason
+                                      reply:reply];
+        CFRelease(ac);
+    } else {
+        [self.context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
+                     localizedReason:self.reason
+                               reply:reply];
+    }
 }
 
 - (void)cancelClicked:(id)sender {
@@ -516,7 +544,8 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
     // Tear down the auth session before the window: the fingerprint UI
     // inside LAAuthenticationView is rendered by a separate system process
     // and composited into our window; detach it before the window goes away.
-    [self.context invalidate];
+    // An approved key context is kept: the caller unseals with it.
+    if (!(self.forKey && self.success)) [self.context invalidate];
     if (self.window) {
         [self.window orderOut:nil];
         [self.window close];
@@ -540,9 +569,12 @@ static NSWindow *buildAuthWindow(NSString *payloadJSON, NSView *authView, id can
 
 // C interface for Go. payloadJSON says what is being approved (see the top of
 // this file). iconPNG/iconPNGLen carry the app logo, shown in the Dock while
-// the authorization window is up.
+// the authorization window is up. keyContext, if not NULL, asks for approval
+// to use the Secure Enclave key (see the top of this file); on success it
+// receives a retained LAContext to unseal with, or NULL if the Secure Enclave
+// must ask for itself.
 int authenticateTouchID(const char *reason, const char *payloadJSON,
-                        const void *iconPNG, int iconPNGLen) {
+                        const void *iconPNG, int iconPNGLen, void **keyContext) {
     @autoreleasepool {
         NSString *reasonStr = [NSString stringWithUTF8String:reason];
 
@@ -555,6 +587,7 @@ int authenticateTouchID(const char *reason, const char *payloadJSON,
         OpcliAuthDelegate *delegate = [[OpcliAuthDelegate alloc] init];
         delegate.reason = reasonStr;
         delegate.payloadJSON = [NSString stringWithUTF8String:payloadJSON];
+        delegate.forKey = keyContext != NULL;
         [NSApp setDelegate:delegate];
         [NSApp run];
 
@@ -589,6 +622,9 @@ int authenticateTouchID(const char *reason, const char *payloadJSON,
             }
         }
 
+        if (keyContext) {
+            *keyContext = delegate.success && delegate.context ? (void *)CFBridgingRetain(delegate.context) : NULL;
+        }
         return delegate.success ? 0 : 1;
     }
 }

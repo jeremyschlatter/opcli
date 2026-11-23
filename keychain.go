@@ -9,7 +9,7 @@ package main
 
 // Defined in touchid.m, linked via libtouchid.a
 extern int authenticateTouchID(const char *reason, const char *payloadJSON,
-                               const void *iconPNG, int iconPNGLen);
+                               const void *iconPNG, int iconPNGLen, void **keyContext);
 
 // opcli keeps its keychain items in the data protection keychain, in the
 // access group named by the binary's keychain-access-groups entitlement
@@ -26,8 +26,19 @@ extern int authenticateTouchID(const char *reason, const char *payloadJSON,
 // `legacy` selects the login keychain instead, where opcli up to v0.22 kept
 // its item behind an app ACL. Only the migration in loadCredentialStore uses
 // it. It has to name that keychain: in an entitled binary, a query that names
-// none searches the data protection keychain first.
-static CFMutableDictionaryRef keychainQuery(const char *service, const char *account, int legacy) {
+// none searches the data protection keychain first. Without a login keychain
+// (errSecNoDefaultKeychain) it returns NULL and sets *status.
+static CFMutableDictionaryRef keychainQuery(const char *service, const char *account, int legacy, OSStatus *status) {
+    SecKeychainRef loginKeychain = NULL;
+    if (legacy) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        *status = SecKeychainCopyDefault(&loginKeychain);
+#pragma clang diagnostic pop
+        if (*status != errSecSuccess) {
+            return NULL;
+        }
+    }
     CFStringRef serviceRef = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
     CFStringRef accountRef = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -35,15 +46,6 @@ static CFMutableDictionaryRef keychainQuery(const char *service, const char *acc
     CFDictionarySetValue(query, kSecAttrService, serviceRef);
     CFDictionarySetValue(query, kSecAttrAccount, accountRef);
     if (legacy) {
-        SecKeychainRef loginKeychain = NULL;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        OSStatus status = SecKeychainCopyDefault(&loginKeychain);
-#pragma clang diagnostic pop
-        if (status != errSecSuccess) {
-            fprintf(stderr, "opcli: SecKeychainCopyDefault: OSStatus %d\n", (int)status);
-            abort();
-        }
         CFArrayRef searchList = CFArrayCreate(NULL, (const void **)&loginKeychain, 1, &kCFTypeArrayCallBacks);
         CFDictionarySetValue(query, kSecMatchSearchList, searchList);
         CFRelease(searchList);
@@ -63,12 +65,13 @@ static CFMutableDictionaryRef keychainQuery(const char *service, const char *acc
 // it otherwise. Delete + add would leave a window where concurrent readers
 // see errSecItemNotFound.
 static OSStatus keychainSet(const char *service, const char *account, const char *password, int passwordLen) {
-    CFMutableDictionaryRef query = keychainQuery(service, account, 0);
+    OSStatus status;
+    CFMutableDictionaryRef query = keychainQuery(service, account, 0, &status);
     CFDataRef passwordRef = CFDataCreate(NULL, (const UInt8 *)password, passwordLen);
     CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(attrs, kSecValueData, passwordRef);
 
-    OSStatus status = SecItemUpdate(query, attrs);
+    status = SecItemUpdate(query, attrs);
     if (status == errSecItemNotFound) {
         CFDictionarySetValue(query, kSecValueData, passwordRef);
         CFDictionarySetValue(query, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
@@ -91,12 +94,16 @@ static OSStatus keychainSet(const char *service, const char *account, const char
 // Returns the password in *outPassword (caller must free) and length in *outLen
 // Returns errSecSuccess on success
 static OSStatus keychainGet(const char *service, const char *account, int legacy, char **outPassword, int *outLen) {
-    CFMutableDictionaryRef query = keychainQuery(service, account, legacy);
+    OSStatus status;
+    CFMutableDictionaryRef query = keychainQuery(service, account, legacy, &status);
+    if (query == NULL) {
+        return status;
+    }
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
 
     CFDataRef result = NULL;
-    OSStatus status = SecItemCopyMatching(query, (CFTypeRef *)&result);
+    status = SecItemCopyMatching(query, (CFTypeRef *)&result);
 
     if (status == errSecSuccess && result != NULL) {
         CFIndex len = CFDataGetLength(result);
@@ -112,8 +119,11 @@ static OSStatus keychainGet(const char *service, const char *account, int legacy
 
 // Delete a keychain item
 static OSStatus keychainDelete(const char *service, const char *account, int legacy) {
-    CFMutableDictionaryRef query = keychainQuery(service, account, legacy);
     OSStatus status;
+    CFMutableDictionaryRef query = keychainQuery(service, account, legacy, &status);
+    if (query == NULL) {
+        return status;
+    }
     if (legacy) {
         // SecItemDelete refuses a login keychain item found through a search
         // list (errSecInvalidOwnerEdit), so look the item up and delete that.
@@ -142,10 +152,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,6 +175,8 @@ type CredentialStore struct {
 	Default  string                    `json:"default"`  // UUID of default account
 
 	SessionSecret string `json:"session_secret,omitempty"` // base64 HMAC key for sessions.json; see GetSessionSecret
+
+	NoKeyCache bool `json:"no_key_cache,omitempty"` // Secure Enclave mode only: see storeSealedCredentials
 }
 
 // StoredAccount holds credentials for a single account.
@@ -186,6 +200,10 @@ var errKeychainNotFound = errors.New("not found in keychain")
 // signing key. CI has the key, and runs the same tests against the keychain.
 var testKeychainDir string
 
+// testKeychainStatus, set only in test builds, makes the files above answer
+// every read with this OSStatus instead, as a keychain that isn't there would.
+var testKeychainStatus int
+
 func testKeychainPath(account string) string {
 	return filepath.Join(testKeychainDir, "keychain-"+keychainService+"."+account)
 }
@@ -194,7 +212,8 @@ func keychainError(status C.OSStatus) error {
 	switch status {
 	case 0:
 		return nil
-	case -25300: // errSecItemNotFound
+	case -25300, // errSecItemNotFound
+		-25307: // errSecNoDefaultKeychain: no login keychain, so nothing in it
 		return errKeychainNotFound
 	case -34018: // errSecMissingEntitlement
 		return fmt.Errorf("keychain error: this opcli binary lacks the keychain-access-groups entitlement (it must be signed and run from opcli.app; see `make sign`)")
@@ -230,6 +249,9 @@ func keychainSet(account, password string) error {
 // of opcli ≤ v0.22 when legacy is set.
 func keychainGet(account string, legacy bool) (string, error) {
 	if testKeychainDir != "" {
+		if testKeychainStatus != 0 {
+			return "", keychainError(C.OSStatus(testKeychainStatus))
+		}
 		if legacy {
 			return "", errKeychainNotFound
 		}
@@ -304,6 +326,9 @@ func keychainDelete(account string, legacy bool) error {
 // GetCachedSymKey retrieves a cached derived symmetric key.
 // Returns the key if cacheKey matches the stored cache key, otherwise error.
 func GetCachedSymKey(accountUUID, cacheKey string) ([]byte, error) {
+	if sealedMode() {
+		return sealedCachedSymKey(accountUUID, cacheKey)
+	}
 	store, err := loadCredentialStore()
 	if err != nil {
 		return nil, err
@@ -317,6 +342,9 @@ func GetCachedSymKey(accountUUID, cacheKey string) ([]byte, error) {
 
 // SetCachedSymKey stores a derived symmetric key in the credential store.
 func SetCachedSymKey(accountUUID, cacheKey string, key []byte) error {
+	if sealedMode() {
+		return setSealedCachedSymKey(accountUUID, cacheKey, key)
+	}
 	store, err := loadCredentialStore()
 	if err != nil {
 		return err
@@ -339,6 +367,14 @@ var cachedCredentialStore *CredentialStore
 func loadCredentialStore() (*CredentialStore, error) {
 	if cachedCredentialStore != nil {
 		return cachedCredentialStore, nil
+	}
+	if sealedMode() {
+		store, err := loadSealedStore()
+		if err != nil {
+			return nil, err
+		}
+		cachedCredentialStore = store
+		return store, nil
 	}
 
 	data, err := keychainGet(keychainCredentials, false)
@@ -379,6 +415,9 @@ func loadCredentialStore() (*CredentialStore, error) {
 
 // saveCredentialStore saves the credential store to keychain.
 func saveCredentialStore(store *CredentialStore) error {
+	if sealedMode() {
+		return saveSealedStore(store)
+	}
 	data, err := json.Marshal(store)
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
@@ -393,6 +432,9 @@ func saveCredentialStore(store *CredentialStore) error {
 // StoreCredentials stores credentials for an account.
 // Sets this account as default if it's the first or only account.
 func StoreCredentials(accountUUID, accountPassword, shorthand, email, signInURL string) error {
+	if sealedMode() {
+		return storeSealedCredentials(accountUUID, accountPassword, shorthand, email, signInURL, false)
+	}
 	store, err := loadCredentialStore()
 	if err != nil {
 		return err
@@ -415,6 +457,9 @@ func StoreCredentials(accountUUID, accountPassword, shorthand, email, signInURL 
 
 // GetPassword retrieves the account password for an account by UUID.
 func GetPassword(accountUUID string) (string, error) {
+	if sealedMode() {
+		return sealedPassword(accountUUID)
+	}
 	store, err := loadCredentialStore()
 	if err != nil {
 		return "", err
@@ -544,14 +589,21 @@ func AuthenticateBiometric(refs []string, sc *scope) error {
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Vault < groups[j].Vault })
-	return touchID("access your 1Password credentials", map[string]any{"groups": groups}, sc)
+	payload := map[string]any{"groups": groups}
+	if sealedMode() {
+		return unsealFor("read "+strings.Join(slices.Sorted(maps.Keys(seen)), ", "), payload)
+	}
+	return touchID("access your 1Password credentials", payload, sc, nil)
 }
 
 // AuthenticateBiometricEverything prompts for Touch ID to approve reading
 // every item of the given accounts (named however the user should see them).
 // The window says so, and looks unlike the one for individual refs.
 func AuthenticateBiometricEverything(accounts []string) error {
-	return touchID("read every item in your 1Password vaults", map[string]any{"everything": accounts}, nil)
+	if sealedMode() {
+		return unsealFor("read EVERY item in your 1Password vaults ("+strings.Join(accounts, ", ")+")", map[string]any{"everything": accounts})
+	}
+	return touchID("read every item in your 1Password vaults", map[string]any{"everything": accounts}, nil, nil)
 }
 
 // touchID shows the Touch ID prompt inside the authorization window that
@@ -565,7 +617,11 @@ func AuthenticateBiometricEverything(accounts []string) error {
 //
 // or, for access to everything, "everything":["account", ...] in place of
 // "groups". reason is the text macOS shows if it falls back to its own dialog.
-func touchID(reason string, payload map[string]any, sc *scope) error {
+//
+// keyCtx, if not nil, makes the approval one to use the Secure Enclave key,
+// and receives the context to unseal with (nil if the Secure Enclave is to ask
+// for itself).
+func touchID(reason string, payload map[string]any, sc *scope, keyCtx *unsafe.Pointer) error {
 	anchor := 0
 	if sc != nil {
 		anchor = sc.pid
@@ -597,7 +653,7 @@ func touchID(reason string, payload map[string]any, sc *scope) error {
 	defer C.free(unsafe.Pointer(cPayload))
 
 	rc := C.authenticateTouchID(cReason, cPayload,
-		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)))
+		unsafe.Pointer(&dockIconPNG[0]), C.int(len(dockIconPNG)), keyCtx)
 	if rc != 0 {
 		return ErrAuthRefused
 	}
@@ -713,6 +769,9 @@ func HasStoredCredentials(accountUUID string) bool {
 
 // DeleteCredentials removes credentials for an account.
 func DeleteCredentials(accountUUID string) error {
+	if sealedMode() {
+		return deleteSealedCredentials(accountUUID)
+	}
 	store, err := loadCredentialStore()
 	if err != nil {
 		return err
@@ -735,6 +794,9 @@ func DeleteCredentials(accountUUID string) error {
 
 // DeleteAllCredentials removes all stored credentials.
 func DeleteAllCredentials() error {
+	if sealedMode() {
+		return deleteAllSealedCredentials()
+	}
 	return keychainDelete(keychainCredentials, false)
 }
 

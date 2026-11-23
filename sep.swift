@@ -91,21 +91,23 @@ public func se_wrap(_ pub: UnsafePointer<UInt8>, _ pubLen: Int,
 }
 
 // se_unwrap opens a blob with the SE key. The ECDH runs inside the SEP, which
-// demands Touch ID first, showing reason. It also returns the key's public
-// key, for sealing again without trusting a public key read from disk.
+// demands Touch ID first: through ctx, a retained LAContext that opcli's
+// window already evaluated for the key (consumed here), or, with ctx NULL,
+// macOS's own prompt showing reason. It also returns the key's public key,
+// for sealing again without trusting a public key read from disk.
 @_cdecl("se_unwrap")
 public func se_unwrap(_ key: UnsafePointer<UInt8>, _ keyLen: Int,
                       _ blob: UnsafePointer<UInt8>, _ blobLen: Int,
-                      _ reason: UnsafePointer<CChar>,
+                      _ reason: UnsafePointer<CChar>, _ approved: UnsafeMutableRawPointer?,
                       _ out: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, _ outLen: UnsafeMutablePointer<Int>,
                       _ pub: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, _ pubLen: UnsafeMutablePointer<Int>,
                       _ err: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32 {
+    let ctx = approved.map { Unmanaged<LAContext>.fromOpaque($0).takeRetainedValue() } ?? LAContext()
     guard blobLen > 65 else {
         err.pointee = strdup("sealed credentials are truncated")
         return 1
     }
     do {
-        let ctx = LAContext()
         ctx.localizedReason = String(cString: reason)
         let se = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: Data(bytes: key, count: keyLen), authenticationContext: ctx)
         let sePub = se.publicKey.x963Representation

@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"os"
+	"unsafe"
 )
 
 func seCreate() (key, pub []byte, err error) {
@@ -40,7 +41,7 @@ func seWrap(pub, msg []byte) ([]byte, error) {
 	return gcm.Seal(nonce, nonce, msg, nil), nil
 }
 
-func seUnwrap(key, blob []byte, reason string) (msg, pub []byte, err error) {
+func seUnwrap(key, blob []byte, reason string, _ unsafe.Pointer) (msg, pub []byte, err error) {
 	if log := os.Getenv("OPCLI_TEST_TOUCHID_LOG"); log != "" {
 		f, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
