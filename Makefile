@@ -1,7 +1,7 @@
 # Build opcli with Touch ID support
 #
 # Requirements:
-# - Xcode Command Line Tools (clang, ar)
+# - Xcode Command Line Tools (clang, ar, swiftc)
 # - Go 1.21+
 # - Apple Developer ID certificate (for codesigning), plus a provisioning
 #   profile and entitlements for it in macos/ (the ones checked in are mine)
@@ -23,6 +23,14 @@ MACOS_MIN := 12.0
 export MACOSX_DEPLOYMENT_TARGET := $(MACOS_MIN)
 export CGO_CFLAGS := -mmacosx-version-min=$(MACOS_MIN)
 
+# The Secure Enclave code (sep.swift) goes in through CGO_LDFLAGS, with the
+# search paths for the Swift runtime, which depend on the installed Xcode.
+# #cgo LDFLAGS won't do: cmd/go refuses a Swift library named there (it has an
+# __LLVM section), so keep it out of any -L directory named there, too.
+SDK := $(shell xcrun --show-sdk-path)
+SWIFT_LIB := $(shell dirname $$(xcrun -f swiftc))/../lib/swift/macosx
+export CGO_LDFLAGS := $(CURDIR)/libsep.a -L$(SDK)/usr/lib/swift -L$(SWIFT_LIB)
+
 .PHONY: all clean sign sign-test test update-plugins
 
 all: opcli
@@ -33,6 +41,11 @@ libtouchid.a: touchid.m
 	ar rcs libtouchid.a touchid.o
 	rm -f touchid.o
 
+# Compile the Secure Enclave key wrapping (sep.swift) to a static library
+libsep.a: sep.swift
+	swiftc -O -parse-as-library -emit-library -static -module-name sep \
+		-target $(shell uname -m)-apple-macos$(MACOS_MIN) -o libsep.a sep.swift
+
 # Compile TouchID stub for testing (always returns success)
 libtouchid_stub.a: touchid_stub.m
 	clang -c -o touchid_stub.o touchid_stub.m -fobjc-arc
@@ -40,13 +53,13 @@ libtouchid_stub.a: touchid_stub.m
 	rm -f touchid_stub.o
 
 # Build Go binary (requires libtouchid.a)
-opcli: libtouchid.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
+opcli: libtouchid.a libsep.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
 	go generate
 	go build -ldflags "-X main.Version=$(VERSION)" -o opcli .
 	@rm -f obfuscation.go
 
 # Build test binary with stubbed TouchID
-opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
+opcli-test: libtouchid_stub.a libsep.a $(shell find . -name '*.go') migrations/sql/*.sql go.mod go.sum
 	go generate
 	go build -tags test -ldflags "-X main.Version=$(VERSION)" -o opcli-test .
 	@rm -f obfuscation.go
@@ -54,7 +67,7 @@ opcli-test: libtouchid_stub.a $(shell find . -name '*.go') migrations/sql/*.sql 
 # Run unit and e2e tests. With SIGN_IDENTITY set, they run from signed bundles
 # against the real keychain. Without it, the keychain tests are skipped and
 # the e2e tests keep their credentials in files.
-test: libtouchid.a
+test: libtouchid.a libsep.a
 	go generate
 ifdef SIGN_IDENTITY
 	go test -exec $(CURDIR)/scripts/exec-test-bundled ./...
@@ -87,4 +100,4 @@ endif
 
 clean:
 	rm -rf opcli.app opcli-test.app
-	rm -f opcli opcli-test libtouchid.a libtouchid_stub.a touchid.o touchid_stub.o
+	rm -f opcli opcli-test libtouchid.a libtouchid_stub.a libsep.a touchid.o touchid_stub.o
