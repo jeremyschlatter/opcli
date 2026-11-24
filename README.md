@@ -44,6 +44,8 @@ The build requires Xcode Command Line Tools and Go 1.21+.
 
 The release is signed with my certificate. To build from source you will need your own Developer ID certificate, and with it your own versions of the files in `macos/`: a Developer ID provisioning profile for an App ID of yours, and entitlements that name your team ID.
 
+Without a certificate, you can still build `opcli` with `make` and use it in [Secure Enclave mode](#secure-enclave-mode), which needs no keychain access.
+
 `make test` works without a certificate. It then runs an unsigned test build, which keeps its credentials in files instead of the keychain, and skips the tests of the keychain itself.
 
 ## Usage
@@ -229,6 +231,37 @@ needs every item (see [Shell plugins](#shell-plugins)). Its approval isn't kept.
 
 This is narrower than the official `op` CLI's desktop app integration, where
 one approval gives a terminal access to the whole account for 10 minutes.
+
+### Secure Enclave mode
+
+```bash
+opcli signin --secure-enclave [--no-key-cache]
+```
+
+Instead of the keychain, this seals your account password (and the key
+derived from it) to a Secure Enclave key that needs Touch ID, with the
+fingers enrolled when it was made. Then it is the Secure Enclave, not opcli,
+that insists on Touch ID: a binary signed with opcli's key, or patched, can't
+read your password without your finger either.
+
+The trade-off is that nothing stays approved. Since the Secure Enclave asks
+for Touch ID before every unseal, a session could never save a prompt, so
+there are none: every command asks once, in the same window as keychain
+mode, listing what that command reads. That window's Touch ID approves use of
+the Secure Enclave key itself, so the Secure Enclave doesn't ask again. To read several secrets for one Touch ID, read them
+in one command (`opcli run`, `opcli inject`).
+
+Once you sign in this way, later sign-ins are sealed too, until you sign out
+of the last account. `--no-key-cache` keeps the derived key out of storage
+altogether, at the cost of a PBKDF2 run per command. It all lives in
+`~/.opcli`, each file 0600: `credentials.json` (your accounts, no secrets),
+`se-key` (a handle to the key that only this Mac's Secure Enclave can use)
+and `secrets.sealed`. Signing out of the last account deletes all three. If
+you change your enrolled fingerprints, the key stops working: delete them and
+sign in again.
+
+This mode needs no keychain access group, so it works in a build that isn't
+signed with opcli's certificate. Refusing Touch ID still exits with status 3.
 
 ## Requirements
 

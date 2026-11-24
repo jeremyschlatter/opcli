@@ -62,7 +62,9 @@ type testEnv struct {
 	keychainService string
 }
 
-func setupTestEnv(t testing.TB, fromV1 bool) *testEnv {
+// setupTestEnv signs in to every account of a new test database. storeEnv
+// goes to the command that stores the credentials.
+func setupTestEnv(t testing.TB, fromV1 bool, storeEnv ...string) *testEnv {
 	t.Helper()
 
 	// Build the test binary (cached across test runs)
@@ -113,6 +115,7 @@ func setupTestEnv(t testing.TB, fromV1 bool) *testEnv {
 			"OPCLI_TEST_SHORTHAND="+acct.Shorthand,
 			"OPCLI_TEST_URL="+acct.URL,
 		)
+		cmd.Env = append(cmd.Env, storeEnv...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

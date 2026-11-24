@@ -225,7 +225,19 @@ func main() {
 			fatal(err)
 		}
 	case "signin":
-		if err := cmdSignin(accountFlag); err != nil {
+		var secureEnclave, noKeyCache bool
+		for _, arg := range args[2:] {
+			switch arg {
+			case "--secure-enclave":
+				secureEnclave = true
+			case "--no-key-cache":
+				noKeyCache = true
+			default:
+				fmt.Fprintln(os.Stderr, "Usage: opcli signin [--account <acct>] [--secure-enclave [--no-key-cache]]")
+				os.Exit(1)
+			}
+		}
+		if err := cmdSignin(accountFlag, secureEnclave, noKeyCache); err != nil {
 			fatal(err)
 		}
 	case "signout":
@@ -265,6 +277,8 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  opcli signin [--account <acct>]      - Store credentials in Keychain")
+	fmt.Println("  opcli signin --secure-enclave [--no-key-cache]")
+	fmt.Println("                                       - Seal credentials to the Secure Enclave instead")
 	fmt.Println("  opcli signout [--account <acct>]     - Remove credentials from Keychain")
 	fmt.Println("  opcli read <op://vault/item/field>   - Read a field from an item")
 	fmt.Println("  opcli read <op://vault/item/section/field>")
@@ -289,7 +303,8 @@ func printUsage() {
 	fmt.Println("Sessions:")
 	fmt.Println("  Touch ID approves the specific secrets a command reads, for the coding")
 	fmt.Println("  agent session or terminal tab it runs in. An approval lasts until its")
-	fmt.Println("  secret goes 10 minutes unread, max 12 hours total.")
+	fmt.Println("  secret goes 10 minutes unread, max 12 hours total. With --secure-enclave,")
+	fmt.Println("  nothing stays approved: every command asks once.")
 }
 
 // resolveAccountUUID resolves an account identifier to a UUID.
@@ -440,7 +455,22 @@ func cmdAccountForget(accountFlag string) error {
 	return nil
 }
 
-func cmdSignin(accountFlag string) error {
+// cmdSignin stores the account password in the keychain, or with
+// secureEnclave, seals it to the Secure Enclave (see sealed_store.go). Once
+// one account is sealed, so are the ones signed in after it.
+func cmdSignin(accountFlag string, secureEnclave, noKeyCache bool) error {
+	sealed := secureEnclave || sealedMode()
+	if noKeyCache && !sealed {
+		return fmt.Errorf("--no-key-cache needs --secure-enclave")
+	}
+	if secureEnclave && !sealedMode() {
+		// An unsigned build can't read the keychain, and has nothing there to
+		// lose: a keychain that can't be read (or isn't there) holds no accounts.
+		if store, err := loadCredentialStore(); err == nil && len(store.Accounts) > 0 {
+			return fmt.Errorf("opcli keeps your other accounts in the keychain: sign out of them first, or sign in without --secure-enclave")
+		}
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -484,6 +514,15 @@ func cmdSignin(accountFlag string) error {
 		return fmt.Errorf("invalid credentials: %w", err)
 	}
 	_ = vk // only used to verify credentials; db closed by defer
+
+	if sealed {
+		if err := storeSealedCredentials(dbAccount.AccountUUID, password, shorthand, account.UserEmail, account.SignInURL, noKeyCache); err != nil {
+			return fmt.Errorf("failed to store credentials: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Credentials sealed to this Mac's Secure Enclave.")
+		fmt.Fprintln(os.Stderr, "Touch ID will ask you to approve what each command reads, every time.")
+		return nil
+	}
 
 	// Store in keychain
 	if err := StoreCredentials(dbAccount.AccountUUID, password, shorthand, account.UserEmail, account.SignInURL); err != nil {
@@ -1045,7 +1084,11 @@ func cmdRead(uri string, accountFlag string) error {
 	if err := aks.authorizeRefs(uri); err != nil {
 		return err
 	}
-	t.mark("authorize (session check)")
+	if sealedMode() {
+		t.mark("authorize (Touch ID, unseal)")
+	} else {
+		t.mark("authorize (session check)")
+	}
 
 	value, err := resolveRef(aks, uri, t)
 	if err != nil {

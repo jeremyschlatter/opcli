@@ -2,7 +2,10 @@
 
 package main
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 func init() {
 	if svc := os.Getenv("OPCLI_TEST_KEYCHAIN_SERVICE"); svc != "" {
@@ -20,5 +23,6 @@ func init() {
 			panic(err)
 		}
 		testKeychainDir = testDataDir
+		testKeychainStatus, _ = strconv.Atoi(os.Getenv("OPCLI_TEST_KEYCHAIN_STATUS"))
 	}
 }

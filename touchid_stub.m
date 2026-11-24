@@ -6,8 +6,9 @@
 #include <stdlib.h>
 
 int authenticateTouchID(const char *reason, const char *payloadJSON,
-                        const void *iconPNG, int iconPNGLen) {
+                        const void *iconPNG, int iconPNGLen, void **keyContext) {
     (void)reason;
+    if (keyContext) *keyContext = NULL;
     (void)iconPNG;
     (void)iconPNGLen;
     const char *log = getenv("OPCLI_TEST_TOUCHID_LOG");
